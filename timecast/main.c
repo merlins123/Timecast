@@ -176,7 +176,6 @@ typedef struct __attribute__((packed)) {
 static inline bool _is_master(void);
 
 static timecast_protocol_cfg_t g_proto_cfg = {
-    .use_pre_p2 = (bool)(TCAST_USE_PRE_P2 != 0U),
     .local_node_id = (uint8_t)TC_NODE_ID,
     .local_hop = (uint8_t)TCAST_LOCAL_HOP,
     .ntx = NTX,
@@ -195,6 +194,24 @@ static timecast_protocol_cfg_t g_proto_cfg = {
                                 (8U * TCAST_SLOT_PHY_OVERHEAD_BYTES)),
     .p2_payload_byte_ticks = TCAST_US_TO_TIMER_TICKS(8U),
 };
+
+typedef enum {
+    TCAST_RUN_MODE_ORIGINAL = 0,
+    TCAST_RUN_MODE_PRE_P2,
+} tcast_run_mode_t;
+
+static const tcast_run_mode_t g_run_mode =
+    (TCAST_USE_PRE_P2 != 0U) ? TCAST_RUN_MODE_PRE_P2 : TCAST_RUN_MODE_ORIGINAL;
+
+static inline bool _use_pre_p2_mode(void)
+{
+    return (g_run_mode == TCAST_RUN_MODE_PRE_P2);
+}
+
+static inline const char *_run_mode_name(void)
+{
+    return _use_pre_p2_mode() ? "pre_p2" : "original";
+}
 
 static inline bool _log_this_error(uint32_t counter)
 {
@@ -224,6 +241,12 @@ static inline uint32_t _p2_max_duration_ticks(uint8_t node_count)
              g_proto_cfg.p2_guard_ticks));
 }
 
+static inline uint32_t _fixed_p2_slot_ticks(void)
+{
+    return (uint32_t)g_proto_cfg.p2_node_count *
+           (g_proto_cfg.p2_subslot_ticks + g_proto_cfg.p2_guard_ticks);
+}
+
 static inline uint32_t _p2_subslot_ticks_from_payload_len(uint8_t p2_payload_len)
 {
     if ((p2_payload_len < TIMECAST_PACKET_P2_DATA_HDR_LEN) ||
@@ -235,18 +258,13 @@ static inline uint32_t _p2_subslot_ticks_from_payload_len(uint8_t p2_payload_len
            ((uint32_t)p2_payload_len * g_proto_cfg.p2_payload_byte_ticks);
 }
 
-static uint32_t _estimated_p2_slot_ticks(bool assume_max_missing)
+static uint32_t _estimated_pre_p2_p2_slot_ticks(bool assume_max_missing)
 {
     uint8_t source_id;
     uint8_t default_p2_payload_len = assume_max_missing ?
                                      (uint8_t)TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN :
                                      TCAST_LOCAL_P2_PAYLOAD_LEN;
     uint32_t slot_ticks = 0U;
-
-    if (!g_proto_cfg.use_pre_p2) {
-        return (uint32_t)g_proto_cfg.p2_node_count *
-               (g_proto_cfg.p2_subslot_ticks + g_proto_cfg.p2_guard_ticks);
-    }
 
     if (g_proto.p2.slot_ticks > 0U) {
         return g_proto.p2.slot_ticks;
@@ -270,23 +288,32 @@ static uint32_t _estimated_p2_slot_ticks(bool assume_max_missing)
     return slot_ticks;
 }
 
-static uint32_t _estimated_p2_duration_ticks(void)
+static uint32_t _original_p2_duration_ticks(void)
 {
-    return (uint32_t)(2U * NTX) * _estimated_p2_slot_ticks(_is_master());
+    return _p2_duration_ticks(g_proto_cfg.p2_node_count);
 }
 
-static uint32_t _round_period_ticks(void)
+static uint32_t _estimated_pre_p2_p2_duration_ticks(void)
+{
+    return (uint32_t)(2U * NTX) * _estimated_pre_p2_p2_slot_ticks(_is_master());
+}
+
+static uint32_t _original_round_period_ticks(void)
 {
     uint32_t period_ticks = P1_SYNC_DURATION_TICKS + g_proto_cfg.p1_guard_ticks;
 
-    if (g_proto_cfg.use_pre_p2) {
-        period_ticks += _pre_p2_duration_ticks(g_proto_cfg.p2_node_count);
-        period_ticks += g_proto_cfg.p1_guard_ticks;
-        period_ticks += _estimated_p2_duration_ticks();
-    }
-    else {
-        period_ticks += _p2_duration_ticks(g_proto_cfg.p2_node_count);
-    }
+    period_ticks += _original_p2_duration_ticks();
+
+    return period_ticks + TCAST_US_TO_TIMER_TICKS(TCAST_ROUND_GAP_US);
+}
+
+static uint32_t _pre_p2_round_period_ticks(void)
+{
+    uint32_t period_ticks = P1_SYNC_DURATION_TICKS + g_proto_cfg.p1_guard_ticks;
+
+    period_ticks += _pre_p2_duration_ticks(g_proto_cfg.p2_node_count);
+    period_ticks += g_proto_cfg.p1_guard_ticks;
+    period_ticks += _estimated_pre_p2_p2_duration_ticks();
 
     return period_ticks + TCAST_US_TO_TIMER_TICKS(TCAST_ROUND_GAP_US);
 }
@@ -458,34 +485,28 @@ static void _refresh_local_payload(void)
     }
 }
 
-static uint32_t _current_p2_start_ticks(void)
+static uint32_t _original_p2_start_ticks(void)
 {
-    if (g_proto_cfg.use_pre_p2) {
-        return timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
-    }
-
     return timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
 }
 
-static void _wait_out_estimated_p2(uint32_t p2_start_ticks)
+static uint32_t _pre_p2_p2_start_ticks(void)
 {
-    uint32_t p2_end_ticks = p2_start_ticks + _estimated_p2_duration_ticks();
+    return timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
+}
+
+static void _wait_out_estimated_pre_p2_p2(uint32_t p2_start_ticks)
+{
+    uint32_t p2_end_ticks = p2_start_ticks + _estimated_pre_p2_p2_duration_ticks();
 
     if ((int32_t)(p2_end_ticks - radio_util_now_ticks()) > 0) {
         _wait_until_ticks(p2_end_ticks);
     }
 }
 
-static uint32_t _actual_round_duration_ticks(void)
+static uint32_t _actual_original_round_duration_ticks(void)
 {
-    uint32_t start_ticks;
-
-    if (g_proto_cfg.use_pre_p2) {
-        start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-    }
-    else {
-        start_ticks = _current_p2_start_ticks();
-    }
+    uint32_t start_ticks = _original_p2_start_ticks();
 
     if (start_ticks == 0U) {
         return 0U;
@@ -494,14 +515,122 @@ static uint32_t _actual_round_duration_ticks(void)
     return radio_util_now_ticks() - start_ticks;
 }
 
-static void _log_round_summary(void)
+static uint32_t _actual_pre_p2_round_duration_ticks(void)
+{
+    uint32_t start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
+
+    if (start_ticks == 0U) {
+        return 0U;
+    }
+
+    return radio_util_now_ticks() - start_ticks;
+}
+
+static void _log_rf_stats_if_needed(uint16_t present_count, uint16_t participant_count)
 {
     tta_driver_stats_t stats;
+
+    if (present_count >= participant_count) {
+        return;
+    }
+
+    tta_driver_get_stats(&stats);
+    printf(",rf={addr=%" PRIu32 ",ok=%" PRIu32 ",crc=%" PRIu32 ",evt=%" PRIu32 "}",
+           stats.rx_address - g_round_start_stats.rx_address,
+           stats.rx_crc_ok - g_round_start_stats.rx_crc_ok,
+           stats.rx_crc_fail - g_round_start_stats.rx_crc_fail,
+           stats.evt_drop - g_round_start_stats.evt_drop);
+}
+
+static void _log_round_summary_original(void)
+{
     uint8_t p2_node_count = timecast_protocol_p2_get_node_list_len(&g_proto);
-    uint32_t round_duration_ticks = _actual_round_duration_ticks();
+    uint32_t round_duration_ticks = _actual_original_round_duration_ticks();
     uint16_t present_count = timecast_store_present_count(&g_store);
     uint16_t participant_count = timecast_store_participant_count(&g_store);
-    uint32_t p2_slot_ticks = _estimated_p2_slot_ticks(_is_master());
+    uint32_t p2_slot_ticks = _fixed_p2_slot_ticks();
+    uint32_t p2_reject_total = g_proto.p2.reject_decode +
+                               g_proto.p2.reject_mode +
+                               g_proto.p2.reject_type +
+                               g_proto.p2.reject_self +
+                               g_proto.p2.reject_epoch +
+                               g_proto.p2.reject_slot +
+                               g_proto.p2.reject_subslot +
+                               g_proto.p2.reject_window +
+                               g_proto.p2.reject_present;
+    uint32_t tx_sched_fail_total = g_proto.p1_tx_sched_fails + g_proto.p2_tx_sched_fails;
+    bool has_errors = (g_proto.slot_misses > 0U) ||
+                      (tx_sched_fail_total > 0U) ||
+                      (g_proto.rx_enable_fails > 0U) ||
+                      (g_proto.p2.slot_misses > 0U) ||
+                      (g_proto.p2.rx_ignored > 0U) ||
+                      (p2_reject_total > 0U);
+
+    printf("[timecast] round{id=%u,role=%s,round=%" PRIu32
+           ",epoch=%" PRIu32 ",joined=%u,hop=%u,relay=%" PRId16
+           ",rx=%" PRIu32 ",ign=%" PRIu32
+           ",p2rx=%" PRIu32 ",p2store=%" PRIu32
+           ",present=%u/%u,p2n=%u"
+           ",p1slot=%u,p2slot=%" PRIu32 ",rdu=%" PRIu32
+           ",tref=%" PRIu32 ",p2start=%" PRIu32
+           ",tcofs=%" PRIu32 ",tcs=%" PRIu32,
+           (unsigned)TC_NODE_ID,
+           _role_name(),
+           g_round_count,
+           g_proto.current_epoch,
+           (unsigned)g_proto.joined,
+           (unsigned)g_proto.p1.local_hop,
+           g_proto.p1.relay_cnt,
+           g_proto.rx_valid,
+           g_proto.rx_ignored,
+           g_proto.p2.rx_valid,
+           g_proto.p2.store_updates,
+           (unsigned)present_count,
+           (unsigned)participant_count,
+           (unsigned)p2_node_count,
+           (unsigned)P1_SLOT_US,
+           TCAST_TIMER_TICKS_TO_US(p2_slot_ticks),
+           TCAST_TIMER_TICKS_TO_US(round_duration_ticks),
+           TCAST_TIMER_TICKS_TO_US(timecast_protocol_p1_get_tref_local_ticks(&g_proto)),
+           TCAST_TIMER_TICKS_TO_US(_original_p2_start_ticks()),
+           TCAST_TIMER_TICKS_TO_US(g_proto_cfg.p1_rx_ts_to_slot_start_ticks),
+           g_p1_offset_sample_count);
+    if (has_errors) {
+        printf(",err={late=%" PRIu32 ",txf={p1=%" PRIu32 ",p2=%" PRIu32 "},rxf=%" PRIu32
+               ",p2miss=%" PRIu32 ",p2ign=%" PRIu32 ",p2rej=%" PRIu32 "}",
+               g_proto.slot_misses,
+               g_proto.p1_tx_sched_fails,
+               g_proto.p2_tx_sched_fails,
+               g_proto.rx_enable_fails,
+               g_proto.p2.slot_misses,
+               g_proto.p2.rx_ignored,
+               p2_reject_total);
+        if (p2_reject_total > 0U) {
+            printf(",p2r={dec=%" PRIu32 ",mode=%" PRIu32 ",type=%" PRIu32
+                   ",self=%" PRIu32 ",ep=%" PRIu32 ",slot=%" PRIu32
+                   ",sub=%" PRIu32 ",win=%" PRIu32 ",dup=%" PRIu32 "}",
+                   g_proto.p2.reject_decode,
+                   g_proto.p2.reject_mode,
+                   g_proto.p2.reject_type,
+                   g_proto.p2.reject_self,
+                   g_proto.p2.reject_epoch,
+                   g_proto.p2.reject_slot,
+                   g_proto.p2.reject_subslot,
+                   g_proto.p2.reject_window,
+                   g_proto.p2.reject_present);
+        }
+    }
+    _log_rf_stats_if_needed(present_count, participant_count);
+    printf("}\n");
+}
+
+static void _log_round_summary_pre_p2(void)
+{
+    uint8_t p2_node_count = timecast_protocol_p2_get_node_list_len(&g_proto);
+    uint32_t round_duration_ticks = _actual_pre_p2_round_duration_ticks();
+    uint16_t present_count = timecast_store_present_count(&g_store);
+    uint16_t participant_count = timecast_store_participant_count(&g_store);
+    uint32_t p2_slot_ticks = _estimated_pre_p2_p2_slot_ticks(_is_master());
     uint32_t pre_p2_reject_total = g_proto.pre_p2.reject_decode +
                                    g_proto.pre_p2.reject_mode +
                                    g_proto.pre_p2.reject_len +
@@ -560,7 +689,7 @@ static void _log_round_summary(void)
            TCAST_TIMER_TICKS_TO_US(p2_slot_ticks),
            TCAST_TIMER_TICKS_TO_US(round_duration_ticks),
            TCAST_TIMER_TICKS_TO_US(timecast_protocol_p1_get_tref_local_ticks(&g_proto)),
-           TCAST_TIMER_TICKS_TO_US(_current_p2_start_ticks()),
+           TCAST_TIMER_TICKS_TO_US(_pre_p2_p2_start_ticks()),
            TCAST_TIMER_TICKS_TO_US(g_proto_cfg.p1_rx_ts_to_slot_start_ticks),
            g_p1_offset_sample_count);
     if (has_errors) {
@@ -602,14 +731,7 @@ static void _log_round_summary(void)
                    g_proto.p2.reject_present);
         }
     }
-    if (present_count < participant_count) {
-        tta_driver_get_stats(&stats);
-        printf(",rf={addr=%" PRIu32 ",ok=%" PRIu32 ",crc=%" PRIu32 ",evt=%" PRIu32 "}",
-               stats.rx_address - g_round_start_stats.rx_address,
-               stats.rx_crc_ok - g_round_start_stats.rx_crc_ok,
-               stats.rx_crc_fail - g_round_start_stats.rx_crc_fail,
-               stats.evt_drop - g_round_start_stats.evt_drop);
-    }
+    _log_rf_stats_if_needed(present_count, participant_count);
     printf("}\n");
 }
 
@@ -980,18 +1102,107 @@ static void _run_p2_subslot(void)
     (void)timecast_protocol_p2_finish_subslot(&g_proto, &g_proto_cfg);
 }
 
+static void _prepare_round(void)
+{
+    uint8_t node_id;
+
+    g_round_count++;
+    _reset_round_trace();
+    tta_driver_get_stats(&g_round_start_stats);
+    timecast_store_clear(&g_store);
+    for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
+        (void)timecast_store_mark_participant(&g_store, node_id);
+    }
+    _refresh_local_payload();
+}
+
+static void _run_p1_phase(uint32_t next_master_round_start_ticks)
+{
+    if (_is_master()) {
+        /* Enter P1 before slot 0 so the first TX is already scheduled
+         * when the round start timestamp arrives. */
+        timecast_protocol_p1_start(&g_proto, next_master_round_start_ticks,
+                                   &g_proto_cfg, true, g_round_count);
+    }
+    else {
+        timecast_protocol_p1_start(&g_proto, 0U, &g_proto_cfg, false, 0U);
+        _scan_until_reference();
+    }
+
+    while (timecast_protocol_p1_is_active(&g_proto) &&
+           timecast_protocol_p1_has_tref(&g_proto)) {
+        _run_p1_slot();
+    }
+}
+
+static void _run_round_original(uint32_t *next_master_round_start_ticks)
+{
+    uint32_t p2_start_ticks;
+
+    _prepare_round();
+    _run_p1_phase(*next_master_round_start_ticks);
+
+    p2_start_ticks = _original_p2_start_ticks();
+    tta_driver_process();
+
+    /* Enter fixed P2 before subslot 0 so the first TX/RX is armed ahead of
+     * the common P2 start timestamp. */
+    timecast_protocol_p2_start_original(&g_proto, p2_start_ticks, &g_proto_cfg);
+    while (timecast_protocol_p2_is_active(&g_proto)) {
+        _run_p2_subslot();
+    }
+
+    _log_round_summary_original();
+
+    if (_is_master()) {
+        *next_master_round_start_ticks += _original_round_period_ticks();
+    }
+}
+
+static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
+{
+    uint32_t next_phase_start_ticks;
+    uint32_t p2_start_ticks;
+
+    _prepare_round();
+    _run_p1_phase(*next_master_round_start_ticks);
+
+    next_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
+    timecast_protocol_pre_p2_start(&g_proto, &g_store, next_phase_start_ticks, &g_proto_cfg);
+    while (timecast_protocol_pre_p2_is_active(&g_proto)) {
+        _run_pre_p2_subslot();
+    }
+    p2_start_ticks = _pre_p2_p2_start_ticks();
+    tta_driver_process();
+
+    /* Enter adaptive P2 before subslot 0 so the first TX/RX is armed ahead of
+     * the common P2 start timestamp. */
+    timecast_protocol_p2_start_pre_p2(&g_proto, p2_start_ticks, &g_proto_cfg);
+    if (!timecast_protocol_pre_p2_is_complete(&g_proto)) {
+        _wait_out_estimated_pre_p2_p2(p2_start_ticks);
+    }
+    while (timecast_protocol_p2_is_active(&g_proto)) {
+        _run_p2_subslot();
+    }
+
+    _log_round_summary_pre_p2();
+
+    if (_is_master()) {
+        *next_master_round_start_ticks += _pre_p2_round_period_ticks();
+    }
+}
+
 int main(void)
 {
     uint32_t next_master_round_start_ticks;
-    uint32_t next_phase_start_ticks;
-    uint32_t p2_start_ticks;
-    printf("TimeCast start. node_id=%u hop=%u role=%s ntx=%u vmod=%u pre_p2=%u app_data=%u payload=%u\n",
+    printf("TimeCast start. node_id=%u hop=%u role=%s mode=%s ntx=%u vmod=%u pre_p2=%u app_data=%u payload=%u\n",
            (unsigned)TC_NODE_ID,
            (unsigned)g_proto_cfg.local_hop,
            _role_name(),
+           _run_mode_name(),
            (unsigned)NTX,
            (unsigned)TCAST_VIRTUAL_SOURCE_MOD,
-           (unsigned)g_proto_cfg.use_pre_p2,
+           (unsigned)_use_pre_p2_mode(),
            (unsigned)TCAST_APP_DATA_LEN,
            (unsigned)TCAST_LOCAL_PAYLOAD_LEN);
     printf("[timecast] timing: p1_slot=%u us pre_p2_subslot=%u us p2_subslot=%u us "
@@ -1035,63 +1246,11 @@ int main(void)
                                     TCAST_US_TO_TIMER_TICKS(TCAST_MASTER_START_DELAY_US);
 
     while (1) {
-        uint8_t node_id;
-
-        g_round_count++;
-        _reset_round_trace();
-        tta_driver_get_stats(&g_round_start_stats);
-        timecast_store_clear(&g_store);
-        for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
-            (void)timecast_store_mark_participant(&g_store, node_id);
-        }
-        _refresh_local_payload();
-
-        if (_is_master()) {
-            /* Enter P1 before slot 0 so the first TX is already scheduled
-             * when the round start timestamp arrives. */
-            timecast_protocol_p1_start(&g_proto, next_master_round_start_ticks,
-                                       &g_proto_cfg, true, g_round_count);
+        if (_use_pre_p2_mode()) {
+            _run_round_pre_p2(&next_master_round_start_ticks);
         }
         else {
-            timecast_protocol_p1_start(&g_proto, 0U, &g_proto_cfg, false, 0U);
-            _scan_until_reference();
-        }
-
-        while (timecast_protocol_p1_is_active(&g_proto) &&
-               timecast_protocol_p1_has_tref(&g_proto)) {
-            _run_p1_slot();
-        }
-
-        next_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-        if (g_proto_cfg.use_pre_p2) {
-            timecast_protocol_pre_p2_start(&g_proto, &g_store, next_phase_start_ticks,
-                                           &g_proto_cfg);
-            while (timecast_protocol_pre_p2_is_active(&g_proto)) {
-                _run_pre_p2_subslot();
-            }
-            p2_start_ticks = timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
-        }
-        else {
-            p2_start_ticks = next_phase_start_ticks;
-        }
-
-        tta_driver_process();
-
-        /* Enter P2 before subslot 0 so the first TX/RX is armed ahead of the
-         * common P2 start timestamp. */
-        timecast_protocol_p2_start(&g_proto, p2_start_ticks, &g_proto_cfg);
-        if (g_proto_cfg.use_pre_p2 &&
-            !timecast_protocol_pre_p2_is_complete(&g_proto)) {
-            _wait_out_estimated_p2(p2_start_ticks);
-        }
-        while (timecast_protocol_p2_is_active(&g_proto)) {
-            _run_p2_subslot();
-        }
-
-        _log_round_summary();
-
-        if (_is_master()) {
-            next_master_round_start_ticks += _round_period_ticks();
+            _run_round_original(&next_master_round_start_ticks);
         }
     }
 

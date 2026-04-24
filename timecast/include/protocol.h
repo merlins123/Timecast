@@ -96,7 +96,6 @@ typedef struct {
 } timecast_protocol_state_t;
 
 typedef struct {
-    bool use_pre_p2;
     uint8_t local_node_id;
     uint8_t local_hop;
     uint8_t ntx;
@@ -161,9 +160,12 @@ bool timecast_protocol_pre_p2_handle_rx(timecast_protocol_state_t *state,
                                         const timecast_protocol_cfg_t *cfg);
 bool timecast_protocol_pre_p2_finish_subslot(timecast_protocol_state_t *state,
                                              const timecast_protocol_cfg_t *cfg);
-void timecast_protocol_p2_start(timecast_protocol_state_t *state,
-                                uint32_t start_local_ticks,
-                                const timecast_protocol_cfg_t *cfg);
+void timecast_protocol_p2_start_original(timecast_protocol_state_t *state,
+                                         uint32_t start_local_ticks,
+                                         const timecast_protocol_cfg_t *cfg);
+void timecast_protocol_p2_start_pre_p2(timecast_protocol_state_t *state,
+                                       uint32_t start_local_ticks,
+                                       const timecast_protocol_cfg_t *cfg);
 bool timecast_protocol_p2_is_active(const timecast_protocol_state_t *state);
 bool timecast_protocol_p2_is_tx_slot(const timecast_protocol_state_t *state);
 uint8_t timecast_protocol_p2_get_slot_idx(const timecast_protocol_state_t *state);

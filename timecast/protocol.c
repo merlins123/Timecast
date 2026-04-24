@@ -529,12 +529,12 @@ bool timecast_protocol_pre_p2_finish_subslot(timecast_protocol_state_t *state,
     return state->pre_p2.active;
 }
 
-void timecast_protocol_p2_start(timecast_protocol_state_t *state,
-                                uint32_t start_local_ticks,
-                                const timecast_protocol_cfg_t *cfg)
+static bool _p2_start_common(timecast_protocol_state_t *state,
+                             uint32_t start_local_ticks,
+                             const timecast_protocol_cfg_t *cfg)
 {
     if (!state || !cfg) {
-        return;
+        return false;
     }
 
     memset(&state->p2, 0, sizeof(state->p2));
@@ -544,16 +544,29 @@ void timecast_protocol_p2_start(timecast_protocol_state_t *state,
     state->p2.start_local_ticks = start_local_ticks;
     state->p2.active = state->joined && (_p2_node_count(state) > 0U);
 
-    if (!state->p2.active) {
+    return state->p2.active;
+}
+
+void timecast_protocol_p2_start_original(timecast_protocol_state_t *state,
+                                         uint32_t start_local_ticks,
+                                         const timecast_protocol_cfg_t *cfg)
+{
+    if (!_p2_start_common(state, start_local_ticks, cfg)) {
         return;
     }
 
-    if (cfg->use_pre_p2) {
-        state->p2.active = state->pre_p2.complete && _p2_build_adaptive_schedule(state, cfg);
+    _p2_build_fixed_schedule(state, cfg);
+}
+
+void timecast_protocol_p2_start_pre_p2(timecast_protocol_state_t *state,
+                                       uint32_t start_local_ticks,
+                                       const timecast_protocol_cfg_t *cfg)
+{
+    if (!_p2_start_common(state, start_local_ticks, cfg)) {
+        return;
     }
-    else {
-        _p2_build_fixed_schedule(state, cfg);
-    }
+
+    state->p2.active = state->pre_p2.complete && _p2_build_adaptive_schedule(state, cfg);
 }
 
 bool timecast_protocol_p2_is_active(const timecast_protocol_state_t *state)
