@@ -71,15 +71,6 @@ bool timecast_store_write(timecast_store_t *store, uint8_t node_id,
     return true;
 }
 
-bool timecast_store_write_local(timecast_store_t *store, const void *data, uint8_t len)
-{
-    if (!store) {
-        return false;
-    }
-
-    return timecast_store_write(store, store->local_node_id, data, len);
-}
-
 bool timecast_store_import(timecast_store_t *store, uint8_t node_id,
                            const void *data, uint8_t len)
 {
@@ -134,10 +125,4 @@ uint16_t timecast_store_present_count(const timecast_store_t *store)
 uint16_t timecast_store_participant_count(const timecast_store_t *store)
 {
     return store ? store->participant_count : 0U;
-}
-
-bool timecast_store_is_complete(const timecast_store_t *store)
-{
-    return store && (store->participant_count > 0U) &&
-           (store->present_count >= store->participant_count);
 }

@@ -40,7 +40,7 @@ static inline uint8_t _p2_payload_len_from_store_len(uint8_t data_len)
     }
 
     if (data_len > TIMECAST_PACKET_P2_DATA_MAX_DATA_LEN) {
-        return TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN;
+        return 0U;
     }
 
     return (uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + data_len);
@@ -106,23 +106,26 @@ static bool _pre_p2_store_p2_payload_len(timecast_protocol_state_t *state,
 static void _pre_p2_seed_local_sources(timecast_protocol_state_t *state,
                                        const timecast_store_t *store)
 {
+    const timecast_store_entry_t *entry;
     uint8_t source_id;
+    uint8_t p2_payload_len;
 
     if (!state || !store) {
         return;
     }
 
-    for (source_id = 0U; source_id < state->pre_p2.node_count; source_id++) {
-        const timecast_store_entry_t *entry = timecast_store_get(store, source_id);
-        uint8_t p2_payload_len;
-
-        if (!entry || !entry->present || (entry->len == 0U)) {
-            continue;
-        }
-
-        p2_payload_len = _p2_payload_len_from_store_len(entry->len);
-        (void)_pre_p2_store_p2_payload_len(state, source_id, p2_payload_len);
+    source_id = store->local_node_id;
+    if (source_id >= state->pre_p2.node_count) {
+        return;
     }
+
+    entry = timecast_store_get(store, source_id);
+    if (!entry || !entry->present || (entry->len == 0U)) {
+        return;
+    }
+
+    p2_payload_len = _p2_payload_len_from_store_len(entry->len);
+    (void)_pre_p2_store_p2_payload_len(state, source_id, p2_payload_len);
 }
 
 static void _p2_build_fixed_schedule(timecast_protocol_state_t *state,
@@ -264,6 +267,7 @@ bool timecast_protocol_p1_prepare_tx(timecast_protocol_state_t *state,
     frame->packet_type = TIMECAST_PACKET_TYPE_P1_SYNC;
     frame->sender_node_id = cfg->local_node_id;
     frame->relay_cnt = (uint8_t)state->p1.relay_cnt;
+    frame->flags = 0U;
     frame->epoch = state->current_epoch;
 
     state->p1.ntx_done++;
@@ -342,9 +346,6 @@ bool timecast_protocol_p1_finish_slot(timecast_protocol_state_t *state,
     state->p1.slot_idx++;
     if (state->p1.slot_idx >= slot_budget) {
         state->p1.active = false;
-        if (state->p1.has_tref) {
-            _set_next_phase_start(state, cfg, state->p1.tref_local_ticks);
-        }
     }
 
     return state->p1.active;
@@ -670,6 +671,7 @@ bool timecast_protocol_p2_prepare_tx(const timecast_protocol_state_t *state,
     frame->source_node_id = owner_id;
     frame->slot_idx = state->p2.slot_idx;
     frame->subslot_idx = state->p2.subslot_idx;
+    frame->flags = 0U;
     frame->data_len = entry->len;
     frame->epoch = state->current_epoch;
     *data_ptr = entry->data;

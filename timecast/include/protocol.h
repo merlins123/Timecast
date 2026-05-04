@@ -14,6 +14,7 @@ extern "C" {
 typedef enum {
     TIMECAST_PHASE_P1_SYNC = 0,
     TIMECAST_PHASE_PRE_P2,
+    TIMECAST_PHASE_PRE_COMMIT,
     TIMECAST_PHASE_P2_DATA,
 } timecast_protocol_phase_t;
 

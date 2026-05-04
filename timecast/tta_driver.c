@@ -65,7 +65,11 @@ static void _emit_event(tta_event_type_t type, const uint8_t *payload,
     tta_event_t ev;
     ev.type = type;
     ev.timestamp_tick = timestamp_tick;
-    ev.payload_len = (len <= sizeof(ev.payload)) ? len : sizeof(ev.payload);
+    if (len > sizeof(ev.payload)) {
+        _stat_evt_drop++;
+        return;
+    }
+    ev.payload_len = len;
 
     if (payload && ev.payload_len) {
         memcpy(ev.payload, payload, ev.payload_len);
@@ -82,10 +86,14 @@ static void _defer_event_from_isr(tta_event_type_t type, const uint8_t *payload,
         _stat_evt_drop++;
         return; /* Queue full, drop event */
     }
+    if (len > sizeof(_evt_queue[_evt_head].payload)) {
+        _stat_evt_drop++;
+        return;
+    }
     
     _evt_queue[_evt_head].type = type;
     _evt_queue[_evt_head].timestamp_tick = timestamp_tick;
-    _evt_queue[_evt_head].payload_len = (len <= sizeof(_evt_queue[_evt_head].payload)) ? len : sizeof(_evt_queue[_evt_head].payload);
+    _evt_queue[_evt_head].payload_len = len;
     if (payload && len) memcpy(_evt_queue[_evt_head].payload, payload, _evt_queue[_evt_head].payload_len);
     _evt_head = next;
 }

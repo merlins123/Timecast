@@ -32,17 +32,15 @@
 #ifndef TCAST_USE_PRE_P2
 #define TCAST_USE_PRE_P2             (0U)
 #endif
+#ifndef TCAST_USE_PRE_COMMIT
+#define TCAST_USE_PRE_COMMIT         (1U)
+#endif
 #ifndef TCAST_APP_DATA_LEN
 #define TCAST_APP_DATA_LEN           (0U)
 #endif
 #define TCAST_LOCAL_PAYLOAD_META_LEN (8U)
 #if (TCAST_APP_DATA_LEN > (TIMECAST_STORE_MAX_DATA_LEN - TCAST_LOCAL_PAYLOAD_META_LEN))
 #error "TCAST_APP_DATA_LEN exceeds TIMECAST_STORE_MAX_DATA_LEN budget"
-#endif
-#if (TCAST_APP_DATA_LEN > 0U)
-#define TCAST_LOCAL_PAYLOAD_DATA_CAPACITY (TCAST_APP_DATA_LEN)
-#else
-#define TCAST_LOCAL_PAYLOAD_DATA_CAPACITY (1U)
 #endif
 #define TCAST_LOCAL_PAYLOAD_LEN ((uint8_t)(TCAST_LOCAL_PAYLOAD_META_LEN + TCAST_APP_DATA_LEN))
 #define TCAST_LOCAL_P2_PAYLOAD_LEN ((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + TCAST_LOCAL_PAYLOAD_LEN))
@@ -82,14 +80,11 @@
 #ifndef TCAST_NTX
 #define TCAST_NTX                     (16U)
 #endif
+#if (TCAST_NTX > 63U)
+#error "TCAST_NTX exceeds 7-bit packed relay_cnt budget"
+#endif
 #ifndef TCAST_P2_NODE_COUNT
 #define TCAST_P2_NODE_COUNT           (4U)
-#endif
-#ifndef TCAST_VIRTUAL_SOURCE_MOD
-#define TCAST_VIRTUAL_SOURCE_MOD      (4U)
-#endif
-#if TCAST_VIRTUAL_SOURCE_MOD < 2
-#error "TCAST_VIRTUAL_SOURCE_MOD must include master and at least one follower"
 #endif
 #ifndef TCAST_P2_START_GUARD_US
 #define TCAST_P2_START_GUARD_US       (TCAST_P1_SLOT_US)
@@ -109,20 +104,11 @@
 #ifndef TCAST_P1_RX_TS_TO_SLOT_START_US
 #define TCAST_P1_RX_TS_TO_SLOT_START_US (TCAST_RADIO_RAMPUP_US + 40U)
 #endif
-#ifndef TCAST_LOG_RX_EACH
-#define TCAST_LOG_RX_EACH             (0U)
-#endif
 #ifndef TCAST_ERR_LOG_EVERY
 #define TCAST_ERR_LOG_EVERY           (256U)
 #endif
-#ifndef TCAST_P1_TX_ARM_US
-#define TCAST_P1_TX_ARM_US            (64U)
-#endif
 #ifndef TCAST_P1_RX_LEAD_US
 #define TCAST_P1_RX_LEAD_US           (80U)
-#endif
-#ifndef TCAST_P2_TX_ARM_US
-#define TCAST_P2_TX_ARM_US            (64U)
 #endif
 #ifndef TCAST_P2_RX_LEAD_US
 #define TCAST_P2_RX_LEAD_US           (80U)
@@ -151,27 +137,65 @@
 #define SLOT_PROCESSING_TICKS TCAST_US_TO_TIMER_TICKS(TCAST_SLOT_PROCESSING_US)
 #define PRE_P2_SUBSLOT_PERIOD_TICKS TCAST_US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_PERIOD_US)
 #define P2_SUBSLOT_PERIOD_TICKS TCAST_US_TO_TIMER_TICKS(P2_SUBSLOT_PERIOD_US)
-#define ROUND_TX_TS_MAX       ((uint32_t)NTX * \
-                               (1U + (uint32_t)P2_NODE_COUNT_MAX + \
-                                (uint32_t)(TCAST_USE_PRE_P2 ? P2_NODE_COUNT_MAX : 0U)))
+#define TCAST_CLASS_COUNT      (16U)
+#define TCAST_CLASS_MAX_ID     (TCAST_CLASS_COUNT - 1U)
+#define TCAST_CLASS_INVALID_ID (TCAST_CLASS_COUNT)
+#define TCAST_PACKED_CLASS_LEN(node_count) (((uint32_t)(node_count) + 1U) / 2U)
+#ifndef TCAST_TEST_NODE2_CLASS_PERIOD
+#define TCAST_TEST_NODE2_CLASS_PERIOD (0U)
+#endif
+#ifndef TCAST_TEST_NODE2_CLASS_MIN
+#define TCAST_TEST_NODE2_CLASS_MIN    (1U)
+#endif
+#ifndef TCAST_TEST_NODE2_CLASS_MAX
+#define TCAST_TEST_NODE2_CLASS_MAX    (TCAST_CLASS_MAX_ID)
+#endif
+#if (TCAST_TEST_NODE2_CLASS_MIN == 0U)
+#error "TCAST_TEST_NODE2_CLASS_MIN must fit the local payload metadata"
+#endif
+#if (TCAST_TEST_NODE2_CLASS_MAX > TCAST_CLASS_MAX_ID)
+#error "TCAST_TEST_NODE2_CLASS_MAX exceeds class range"
+#endif
+#if (TCAST_TEST_NODE2_CLASS_MIN > TCAST_TEST_NODE2_CLASS_MAX)
+#error "TCAST_TEST_NODE2_CLASS_MIN exceeds TCAST_TEST_NODE2_CLASS_MAX"
+#endif
 static timecast_store_t g_store;
 static timecast_protocol_state_t g_proto;
 static uint32_t g_round_count;
-static uint32_t g_round_tx_tick[ROUND_TX_TS_MAX];
-static uint16_t g_round_tx_tick_count;
-static uint32_t g_round_tx_tick_overflow;
 static uint32_t g_p1_offset_sample_count;
 static uint32_t g_p1_tx_slot_start_ticks;
 static bool g_p1_tx_cal_pending;
 static tta_driver_stats_t g_round_start_stats;
+static uint32_t g_round_p2_start_ticks;
+static uint8_t g_committed_class[TIMECAST_STORE_MAX_NODES];
+static uint8_t g_local_desired_class;
+static uint8_t g_local_committed_payload_len;
+static uint8_t g_local_committed_payload[TIMECAST_STORE_MAX_DATA_LEN];
+static uint8_t g_round_schedule_class[TIMECAST_STORE_MAX_NODES];
+static bool g_update_request_latched;
+static bool g_run_pre_local;
+static bool g_run_pre_next_round;
+static bool g_force_initial_pre = true;
+static bool g_round_pre_requested;
+static bool g_round_pre_commit_applied;
+static bool g_round_pre_commit_enabled;
+static uint32_t g_round_pre_commit_slot_ticks;
 
-typedef struct __attribute__((packed)) {
-    uint8_t node_id;
-    uint8_t role;
-    uint16_t reserved;
-    uint32_t round_tag;
-    char data[TCAST_LOCAL_PAYLOAD_DATA_CAPACITY];
-} timecast_local_payload_t;
+typedef struct {
+    bool active;
+    bool flag_tx;
+    bool have_schedule;
+    uint8_t slot_idx;
+    uint8_t ntx_done;
+    int16_t relay_cnt;
+    uint32_t start_local_ticks;
+    uint32_t slot_ticks;
+    uint32_t rx_valid;
+    uint8_t packed_len;
+    uint8_t packed_schedule[TIMECAST_PACKET_PRE_COMMIT_MAX_SCHEDULE_LEN];
+} tcast_pre_commit_state_t;
+
+static tcast_pre_commit_state_t g_pre_commit;
 
 static inline bool _is_master(void);
 
@@ -206,6 +230,11 @@ static const tcast_run_mode_t g_run_mode =
 static inline bool _use_pre_p2_mode(void)
 {
     return (g_run_mode == TCAST_RUN_MODE_PRE_P2);
+}
+
+static inline bool _use_pre_commit_mode(void)
+{
+    return _use_pre_p2_mode() && (TCAST_USE_PRE_COMMIT != 0U);
 }
 
 static inline const char *_run_mode_name(void)
@@ -247,55 +276,26 @@ static inline uint32_t _fixed_p2_slot_ticks(void)
            (g_proto_cfg.p2_subslot_ticks + g_proto_cfg.p2_guard_ticks);
 }
 
-static inline uint32_t _p2_subslot_ticks_from_payload_len(uint8_t p2_payload_len)
-{
-    if ((p2_payload_len < TIMECAST_PACKET_P2_DATA_HDR_LEN) ||
-        (p2_payload_len > TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN)) {
-        return 0U;
-    }
-
-    return g_proto_cfg.p2_payload_base_ticks +
-           ((uint32_t)p2_payload_len * g_proto_cfg.p2_payload_byte_ticks);
-}
-
-static uint32_t _estimated_pre_p2_p2_slot_ticks(bool assume_max_missing)
-{
-    uint8_t source_id;
-    uint8_t default_p2_payload_len = assume_max_missing ?
-                                     (uint8_t)TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN :
-                                     TCAST_LOCAL_P2_PAYLOAD_LEN;
-    uint32_t slot_ticks = 0U;
-
-    if (g_proto.p2.slot_ticks > 0U) {
-        return g_proto.p2.slot_ticks;
-    }
-
-    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
-        uint8_t p2_payload_len = default_p2_payload_len;
-        uint32_t subslot_ticks;
-
-        if (timecast_protocol_pre_p2_has_p2_payload_len(&g_proto, source_id)) {
-            p2_payload_len = g_proto.pre_p2.p2_payload_len[source_id];
-        }
-        subslot_ticks = _p2_subslot_ticks_from_payload_len(p2_payload_len);
-        if (subslot_ticks == 0U) {
-            subslot_ticks = _p2_subslot_ticks_from_payload_len(default_p2_payload_len);
-        }
-
-        slot_ticks += subslot_ticks + g_proto_cfg.p2_guard_ticks;
-    }
-
-    return slot_ticks;
-}
+static inline uint8_t _class_to_payload_len(uint8_t class_id);
 
 static uint32_t _original_p2_duration_ticks(void)
 {
     return _p2_duration_ticks(g_proto_cfg.p2_node_count);
 }
 
-static uint32_t _estimated_pre_p2_p2_duration_ticks(void)
+static uint32_t _pre_commit_slot_ticks(uint8_t node_count)
 {
-    return (uint32_t)(2U * NTX) * _estimated_pre_p2_p2_slot_ticks(_is_master());
+    uint32_t payload_len = TIMECAST_PACKET_PRE_COMMIT_BASE_LEN +
+                           TCAST_PACKED_CLASS_LEN(node_count);
+
+    return TCAST_US_TO_TIMER_TICKS(TCAST_SLOT_PROCESSING_US +
+                                   TCAST_RADIO_RAMPUP_US +
+                                   TCAST_PACKET_AIR_TIME_US(payload_len));
+}
+
+static uint32_t _pre_commit_duration_ticks(uint32_t slot_ticks)
+{
+    return (uint32_t)(2U * NTX) * slot_ticks;
 }
 
 static uint32_t _original_round_period_ticks(void)
@@ -307,25 +307,21 @@ static uint32_t _original_round_period_ticks(void)
     return period_ticks + TCAST_US_TO_TIMER_TICKS(TCAST_ROUND_GAP_US);
 }
 
-static uint32_t _pre_p2_round_period_ticks(void)
+static uint32_t _improved_round_period_ticks(bool run_pre)
 {
     uint32_t period_ticks = P1_SYNC_DURATION_TICKS + g_proto_cfg.p1_guard_ticks;
 
-    period_ticks += _pre_p2_duration_ticks(g_proto_cfg.p2_node_count);
-    period_ticks += g_proto_cfg.p1_guard_ticks;
-    period_ticks += _estimated_pre_p2_p2_duration_ticks();
+    if (run_pre) {
+        period_ticks += _pre_p2_duration_ticks(g_proto_cfg.p2_node_count);
+        period_ticks += g_proto_cfg.p1_guard_ticks;
+        if (g_round_pre_commit_enabled) {
+            period_ticks += _pre_commit_duration_ticks(g_round_pre_commit_slot_ticks);
+            period_ticks += g_proto_cfg.p1_guard_ticks;
+        }
+    }
 
+    period_ticks += (uint32_t)(2U * NTX) * timecast_protocol_p2_get_slot_ticks(&g_proto, &g_proto_cfg);
     return period_ticks + TCAST_US_TO_TIMER_TICKS(TCAST_ROUND_GAP_US);
-}
-
-static void _record_tx_tick(uint32_t ts_tick)
-{
-    if (g_round_tx_tick_count < ROUND_TX_TS_MAX) {
-        g_round_tx_tick[g_round_tx_tick_count++] = ts_tick;
-    }
-    else {
-        g_round_tx_tick_overflow++;
-    }
 }
 
 static void _start_p1_offset_sample(uint32_t slot_start_ticks)
@@ -378,6 +374,118 @@ static void _wait_until_ticks(uint32_t deadline_ticks)
 static inline bool _is_master(void)
 {
     return (TC_NODE_ID == 0U);
+}
+
+static inline uint8_t _class_span_bytes(void)
+{
+    return (uint8_t)(((TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN -
+                       TIMECAST_PACKET_P2_DATA_HDR_LEN + 1U) +
+                      TCAST_CLASS_COUNT - 1U) / TCAST_CLASS_COUNT);
+}
+
+static inline uint8_t _class_to_payload_len(uint8_t class_id)
+{
+    uint32_t payload_len;
+
+    if (class_id > TCAST_CLASS_MAX_ID) {
+        return 0U;
+    }
+    if (class_id == TCAST_CLASS_MAX_ID) {
+        return TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN;
+    }
+
+    payload_len = (uint32_t)TIMECAST_PACKET_P2_DATA_HDR_LEN +
+                  ((uint32_t)(class_id + 1U) * (uint32_t)_class_span_bytes()) - 1U;
+
+    return (uint8_t)payload_len;
+}
+
+static inline uint8_t _payload_len_to_class(uint8_t payload_len)
+{
+    uint32_t offset;
+    uint32_t class_id;
+
+    if (payload_len <= TIMECAST_PACKET_P2_DATA_HDR_LEN) {
+        return 0U;
+    }
+    if (payload_len == TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN) {
+        return TCAST_CLASS_MAX_ID;
+    }
+    if (payload_len > TIMECAST_PACKET_P2_DATA_MAX_PAYLOAD_LEN) {
+        return TCAST_CLASS_INVALID_ID;
+    }
+
+    offset = (uint32_t)payload_len - (uint32_t)TIMECAST_PACKET_P2_DATA_HDR_LEN;
+    class_id = offset / (uint32_t)_class_span_bytes();
+    if (class_id > TCAST_CLASS_MAX_ID) {
+        return TCAST_CLASS_INVALID_ID;
+    }
+
+    return (uint8_t)class_id;
+}
+
+static inline uint8_t _payload_data_len_to_class(uint8_t data_len)
+{
+    if (data_len > TIMECAST_PACKET_P2_DATA_MAX_DATA_LEN) {
+        return TCAST_CLASS_INVALID_ID;
+    }
+
+    return _payload_len_to_class((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + data_len));
+}
+
+static inline uint8_t _local_source_id(void)
+{
+    return (uint8_t)TC_NODE_ID;
+}
+
+static inline bool _has_local_source(void)
+{
+    return (_local_source_id() < g_proto_cfg.p2_node_count);
+}
+
+static uint8_t _local_pending_update_count(void)
+{
+    uint8_t source_id = _local_source_id();
+
+    if (!_has_local_source()) {
+        return 0U;
+    }
+
+    return (g_local_desired_class != g_committed_class[source_id]) ? 1U : 0U;
+}
+
+static void _format_class_map(char *dst, size_t dst_len,
+                              const uint8_t *classes, bool desired_local_map)
+{
+    static const char lut[] = "0123456789ABCDEF";
+    uint8_t source_id;
+
+    if (!dst || (dst_len == 0U)) {
+        return;
+    }
+
+    if ((dst_len <= (size_t)g_proto_cfg.p2_node_count) ||
+        (!desired_local_map && !classes)) {
+        dst[0] = '\0';
+        return;
+    }
+
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        uint8_t class_id;
+
+        if (desired_local_map) {
+            if (source_id != _local_source_id()) {
+                dst[source_id] = '.';
+                continue;
+            }
+            class_id = g_local_desired_class;
+        }
+        else {
+            class_id = classes[source_id];
+        }
+        dst[source_id] = (class_id <= TCAST_CLASS_MAX_ID) ? lut[class_id] : '?';
+    }
+    dst[g_proto_cfg.p2_node_count] = '\0';
 }
 
 static inline const char *_role_name(void)
@@ -446,84 +554,428 @@ static int _try_rx_enable(void)
     return res;
 }
 
-static void _reset_round_trace(void)
+static uint8_t _local_payload_len_for_source(uint8_t source_id)
 {
-    g_round_tx_tick_count = 0U;
-    g_round_tx_tick_overflow = 0U;
+    (void)source_id;
+#if (TCAST_TEST_NODE2_CLASS_PERIOD > 0U)
+    if (source_id == 2U) {
+        uint32_t round_idx = (g_round_count > 0U) ? (g_round_count - 1U) : 0U;
+        uint32_t class_span = (uint32_t)TCAST_TEST_NODE2_CLASS_MAX -
+                              (uint32_t)TCAST_TEST_NODE2_CLASS_MIN + 1U;
+        uint8_t class_id = (uint8_t)((uint32_t)TCAST_TEST_NODE2_CLASS_MIN +
+                                     ((round_idx / (uint32_t)TCAST_TEST_NODE2_CLASS_PERIOD) %
+                                      class_span));
+        uint8_t p2_payload_len = _class_to_payload_len(class_id);
+
+        return (uint8_t)(p2_payload_len - TIMECAST_PACKET_P2_DATA_HDR_LEN);
+    }
+#endif
+
+    return TCAST_LOCAL_PAYLOAD_LEN;
+}
+
+static uint8_t _build_local_payload(uint8_t source_id, uint8_t *dst)
+{
+    uint8_t payload_len;
+
+    if (!dst) {
+        return 0U;
+    }
+
+    payload_len = _local_payload_len_for_source(source_id);
+    if ((payload_len < TCAST_LOCAL_PAYLOAD_META_LEN) ||
+        (payload_len > TIMECAST_STORE_MAX_DATA_LEN)) {
+        return 0U;
+    }
+
+    memset(dst, 0, payload_len);
+    dst[0] = source_id;
+    dst[1] = _is_master() ? 1U : 0U;
+    dst[4] = (uint8_t)(g_round_count & 0xFFU);
+    dst[5] = (uint8_t)((g_round_count >> 8) & 0xFFU);
+    dst[6] = (uint8_t)((g_round_count >> 16) & 0xFFU);
+    dst[7] = (uint8_t)((g_round_count >> 24) & 0xFFU);
+    if (payload_len > TCAST_LOCAL_PAYLOAD_META_LEN) {
+        memset(&dst[TCAST_LOCAL_PAYLOAD_META_LEN], 'c',
+               (size_t)(payload_len - TCAST_LOCAL_PAYLOAD_META_LEN));
+    }
+
+    return payload_len;
+}
+
+static bool _pack_class_schedule(const uint8_t *classes, uint8_t node_count,
+                                 uint8_t *packed_out, uint8_t *packed_len_out)
+{
+    uint8_t source_id;
+    uint8_t packed_len = (uint8_t)TCAST_PACKED_CLASS_LEN(node_count);
+
+    if (!classes || !packed_out || !packed_len_out) {
+        return false;
+    }
+
+    memset(packed_out, 0, packed_len);
+    for (source_id = 0U; source_id < node_count; source_id++) {
+        uint8_t class_id = classes[source_id];
+        uint8_t byte_idx = (uint8_t)(source_id / 2U);
+
+        if (class_id > TCAST_CLASS_MAX_ID) {
+            return false;
+        }
+
+        if ((source_id & 0x1U) == 0U) {
+            packed_out[byte_idx] |= class_id;
+        }
+        else {
+            packed_out[byte_idx] |= (uint8_t)(class_id << 4);
+        }
+    }
+
+    *packed_len_out = packed_len;
+    return true;
+}
+
+static void _unpack_class_schedule(const uint8_t *packed, uint8_t node_count, uint8_t *classes_out)
+{
+    uint8_t source_id;
+
+    if (!packed || !classes_out) {
+        return;
+    }
+
+    for (source_id = 0U; source_id < node_count; source_id++) {
+        uint8_t packed_byte = packed[source_id / 2U];
+
+        if ((source_id & 0x1U) == 0U) {
+            classes_out[source_id] = (uint8_t)(packed_byte & 0x0FU);
+        }
+        else {
+            classes_out[source_id] = (uint8_t)((packed_byte >> 4) & 0x0FU);
+        }
+    }
+}
+
+static bool _seed_round_schedule_from_committed(void)
+{
+    uint8_t source_id;
+
+    g_proto.pre_p2.node_count = g_proto_cfg.p2_node_count;
+    g_proto.pre_p2.complete = true;
+    g_proto.pre_p2.known_count = g_proto_cfg.p2_node_count;
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        uint8_t p2_payload_len = _class_to_payload_len(g_committed_class[source_id]);
+
+        if (p2_payload_len == 0U) {
+            return false;
+        }
+        g_proto.pre_p2.present[source_id] = 1U;
+        g_proto.pre_p2.p2_payload_len[source_id] = p2_payload_len;
+    }
+
+    return true;
+}
+
+static bool _build_schedule_from_pre_collect(uint8_t *classes_out)
+{
+    uint8_t source_id;
+
+    if (!classes_out) {
+        return false;
+    }
+
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        if (timecast_protocol_pre_p2_has_p2_payload_len(&g_proto, source_id)) {
+            uint8_t class_id = _payload_len_to_class(g_proto.pre_p2.p2_payload_len[source_id]);
+
+            if (class_id > TCAST_CLASS_MAX_ID) {
+                return false;
+            }
+            classes_out[source_id] = class_id;
+        }
+        else {
+            classes_out[source_id] = TCAST_CLASS_MAX_ID;
+        }
+    }
+
+    return true;
+}
+
+static bool _apply_round_schedule_to_proto(const uint8_t *classes)
+{
+    uint8_t source_id;
+
+    if (!classes) {
+        return false;
+    }
+
+    g_proto.pre_p2.node_count = g_proto_cfg.p2_node_count;
+    g_proto.pre_p2.complete = true;
+    g_proto.pre_p2.known_count = g_proto_cfg.p2_node_count;
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        uint8_t p2_payload_len = _class_to_payload_len(classes[source_id]);
+
+        if (p2_payload_len == 0U) {
+            return false;
+        }
+        g_proto.pre_p2.present[source_id] = 1U;
+        g_proto.pre_p2.p2_payload_len[source_id] = p2_payload_len;
+    }
+
+    return true;
+}
+
+static bool _local_update_pending(void)
+{
+    return (_local_pending_update_count() > 0U);
+}
+
+static bool _commit_schedule(const uint8_t *classes)
+{
+    uint8_t source_id;
+    uint8_t local_source_id = _local_source_id();
+    uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
+    uint8_t payload_len;
+
+    if (!classes) {
+        return false;
+    }
+
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        if (classes[source_id] > TCAST_CLASS_MAX_ID) {
+            return false;
+        }
+    }
+
+    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
+        g_committed_class[source_id] = classes[source_id];
+        g_round_schedule_class[source_id] = classes[source_id];
+    }
+
+    if (local_source_id < g_proto_cfg.p2_node_count) {
+        payload_len = _build_local_payload(local_source_id, payload);
+        memcpy(g_local_committed_payload, payload, payload_len);
+        g_local_committed_payload_len = payload_len;
+    }
+
+    g_update_request_latched = _local_update_pending();
+    return true;
 }
 
 static void _refresh_local_payload(void)
 {
-    timecast_local_payload_t payload;
-    uint8_t source_id;
+    uint8_t source_id = _local_source_id();
+    uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
+    uint8_t payload_len;
+    uint8_t payload_class;
+    uint8_t committed_payload_len;
 
-    memset(&payload, 0, sizeof(payload));
-    payload.role = _is_master() ? 1U : 0U;
-    payload.reserved = 0U;
-    payload.round_tag = g_round_count;
-#if (TCAST_APP_DATA_LEN > 0U)
-    memset(payload.data, 'c', TCAST_APP_DATA_LEN);
-#endif
+    if (source_id >= g_proto_cfg.p2_node_count) {
+        return;
+    }
 
-    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
-        uint8_t owner_id;
+    payload_len = _build_local_payload(source_id, payload);
+    payload_class = _payload_data_len_to_class(payload_len);
+    if (payload_class > TCAST_CLASS_MAX_ID) {
+        g_update_request_latched = true;
+        return;
+    }
+    g_local_desired_class = payload_class;
+    if (payload_class != g_committed_class[source_id]) {
+        g_update_request_latched = true;
+    }
 
-        if (source_id == 0U) {
-            owner_id = 0U;
-        }
-        else {
-            owner_id = (uint8_t)(((uint32_t)(source_id - 1U) %
-                                  ((uint32_t)TCAST_VIRTUAL_SOURCE_MOD - 1U)) + 1U);
-        }
-
-        if (owner_id != (uint8_t)TC_NODE_ID) {
-            continue;
-        }
-
-        payload.node_id = source_id;
-        (void)timecast_store_write(&g_store, source_id, &payload, TCAST_LOCAL_PAYLOAD_LEN);
+    committed_payload_len = _class_to_payload_len(g_committed_class[source_id]);
+    if (committed_payload_len == 0U) {
+        g_update_request_latched = true;
+        return;
+    }
+    if ((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + payload_len) <= committed_payload_len) {
+        (void)timecast_store_write(&g_store, source_id, payload, payload_len);
+    }
+    else if (g_local_committed_payload_len > 0U) {
+        (void)timecast_store_write(&g_store, source_id,
+                                   g_local_committed_payload,
+                                   g_local_committed_payload_len);
     }
 }
 
-static uint32_t _original_p2_start_ticks(void)
+static void _wait_out_max_p2(uint32_t p2_start_ticks)
 {
-    return timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-}
-
-static uint32_t _pre_p2_p2_start_ticks(void)
-{
-    return timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
-}
-
-static void _wait_out_estimated_pre_p2_p2(uint32_t p2_start_ticks)
-{
-    uint32_t p2_end_ticks = p2_start_ticks + _estimated_pre_p2_p2_duration_ticks();
+    uint32_t p2_end_ticks = p2_start_ticks + _p2_max_duration_ticks(g_proto_cfg.p2_node_count);
 
     if ((int32_t)(p2_end_ticks - radio_util_now_ticks()) > 0) {
         _wait_until_ticks(p2_end_ticks);
     }
 }
 
-static uint32_t _actual_original_round_duration_ticks(void)
+static uint32_t _elapsed_since_ticks(uint32_t start_ticks, uint32_t now_ticks)
 {
-    uint32_t start_ticks = _original_p2_start_ticks();
-
     if (start_ticks == 0U) {
         return 0U;
     }
 
-    return radio_util_now_ticks() - start_ticks;
+    return now_ticks - start_ticks;
 }
 
-static uint32_t _actual_pre_p2_round_duration_ticks(void)
+static void _pre_commit_start(uint32_t start_local_ticks, const uint8_t *classes)
 {
-    uint32_t start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-
-    if (start_ticks == 0U) {
-        return 0U;
+    memset(&g_pre_commit, 0, sizeof(g_pre_commit));
+    g_pre_commit.active = g_run_pre_local && g_round_pre_commit_enabled;
+    g_pre_commit.start_local_ticks = start_local_ticks;
+    g_pre_commit.slot_ticks = _pre_commit_slot_ticks(g_proto_cfg.p2_node_count);
+    if (g_pre_commit.active) {
+        g_proto.phase = TIMECAST_PHASE_PRE_COMMIT;
+    }
+    if (!_is_master() || !g_pre_commit.active || !classes) {
+        return;
     }
 
-    return radio_util_now_ticks() - start_ticks;
+    if (!_pack_class_schedule(classes, g_proto_cfg.p2_node_count,
+                              g_pre_commit.packed_schedule, &g_pre_commit.packed_len)) {
+        g_pre_commit.active = false;
+        return;
+    }
+    g_pre_commit.have_schedule = true;
+    g_pre_commit.flag_tx = true;
+    g_pre_commit.relay_cnt = -1;
+}
+
+static uint32_t _pre_commit_slot_start_ticks(void)
+{
+    return g_pre_commit.start_local_ticks +
+           ((uint32_t)g_pre_commit.slot_idx * g_pre_commit.slot_ticks);
+}
+
+static uint32_t _pre_commit_p2_start_ticks(void)
+{
+    return g_pre_commit.start_local_ticks +
+           _pre_commit_duration_ticks(g_pre_commit.slot_ticks) +
+           g_proto_cfg.p1_guard_ticks;
+}
+
+static void _handle_pre_commit_rx(const tta_event_t *event)
+{
+    timecast_pre_commit_frame_t frame;
+    uint8_t packed_schedule[TIMECAST_PACKET_PRE_COMMIT_MAX_SCHEDULE_LEN];
+    size_t packed_len = 0U;
+    uint32_t slot_start_ticks;
+    int32_t rx_offset_ticks;
+
+    if (!timecast_packet_decode_pre_commit(event->payload, event->payload_len,
+                                           g_proto_cfg.p2_node_count,
+                                           &frame, packed_schedule, &packed_len)) {
+        return;
+    }
+    if (!g_pre_commit.active) {
+        return;
+    }
+
+    slot_start_ticks = _pre_commit_slot_start_ticks();
+    rx_offset_ticks = (int32_t)(event->timestamp_tick - slot_start_ticks);
+    if ((rx_offset_ticks < 0) ||
+        (rx_offset_ticks > (int32_t)g_proto_cfg.p2_rx_window_ticks)) {
+        return;
+    }
+
+    if (!g_pre_commit.have_schedule) {
+        memcpy(g_pre_commit.packed_schedule, packed_schedule, packed_len);
+        g_pre_commit.packed_len = (uint8_t)packed_len;
+        g_pre_commit.have_schedule = true;
+    }
+    if (((int16_t)frame.relay_cnt > g_pre_commit.relay_cnt) ||
+        (g_pre_commit.relay_cnt < 0)) {
+        g_pre_commit.relay_cnt = (int16_t)frame.relay_cnt;
+    }
+    g_pre_commit.flag_tx = true;
+    g_pre_commit.rx_valid++;
+}
+
+static bool _pre_commit_finish_slot(bool did_tx)
+{
+    if (!g_pre_commit.active) {
+        return false;
+    }
+
+    if (did_tx) {
+        g_pre_commit.flag_tx = false;
+    }
+    else if (g_pre_commit.have_schedule) {
+        g_pre_commit.flag_tx = true;
+    }
+
+    g_pre_commit.slot_idx++;
+    if (g_pre_commit.slot_idx >= (uint8_t)(2U * NTX)) {
+        g_pre_commit.active = false;
+    }
+
+    return g_pre_commit.active;
+}
+
+static void _run_pre_commit_slot(void)
+{
+    uint32_t slot_start_ticks = _pre_commit_slot_start_ticks();
+    uint32_t slot_end_ticks = slot_start_ticks + g_pre_commit.slot_ticks;
+    uint32_t slot_active_end_ticks = slot_end_ticks - SLOT_PROCESSING_TICKS;
+    uint32_t rx_window_end_ticks = slot_start_ticks + g_proto_cfg.p2_rx_window_ticks;
+    uint32_t now_ticks = radio_util_now_ticks();
+    bool do_tx = g_pre_commit.have_schedule && g_pre_commit.flag_tx &&
+                 (g_pre_commit.ntx_done < NTX);
+
+    if ((int32_t)(rx_window_end_ticks - slot_active_end_ticks) > 0) {
+        rx_window_end_ticks = slot_active_end_ticks;
+    }
+
+    if ((int32_t)(now_ticks - slot_start_ticks) >= 0) {
+        (void)_pre_commit_finish_slot(do_tx);
+        return;
+    }
+
+    if (do_tx) {
+        timecast_pre_commit_frame_t frame;
+        uint8_t payload[TIMECAST_PACKET_PRE_COMMIT_MAX_PAYLOAD_LEN] = {0};
+        uint32_t tx_active_end_ticks;
+
+        g_pre_commit.relay_cnt++;
+        frame.relay_cnt = (uint8_t)g_pre_commit.relay_cnt;
+        if (!timecast_packet_encode_pre_commit(payload, sizeof(payload), &frame,
+                                               g_pre_commit.packed_schedule,
+                                               g_pre_commit.packed_len)) {
+            (void)_pre_commit_finish_slot(true);
+            return;
+        }
+        if (tta_driver_tx(payload,
+                          TIMECAST_PACKET_PRE_COMMIT_BASE_LEN + g_pre_commit.packed_len,
+                          slot_start_ticks) < 0) {
+            (void)_pre_commit_finish_slot(true);
+            return;
+        }
+
+        tx_active_end_ticks = slot_start_ticks +
+                              TCAST_US_TO_TIMER_TICKS(
+                                  TCAST_RADIO_RAMPUP_US +
+                                  TCAST_PACKET_AIR_TIME_US(
+                                      TIMECAST_PACKET_PRE_COMMIT_BASE_LEN +
+                                      g_pre_commit.packed_len));
+        if ((int32_t)(tx_active_end_ticks - slot_active_end_ticks) > 0) {
+            tx_active_end_ticks = slot_active_end_ticks;
+        }
+        _wait_until_ticks(tx_active_end_ticks);
+        g_pre_commit.ntx_done++;
+        (void)_pre_commit_finish_slot(true);
+        return;
+    }
+
+    _wait_for_arm(slot_start_ticks, TCAST_US_TO_TIMER_TICKS(TCAST_P1_RX_LEAD_US));
+    if (_try_rx_enable() < 0) {
+        (void)_pre_commit_finish_slot(false);
+        return;
+    }
+
+    _wait_until_ticks(rx_window_end_ticks);
+    if (tta_driver_rx_disable() == -EBUSY) {
+        (void)_drain_rx_until_idle(slot_end_ticks);
+    }
+
+    (void)_pre_commit_finish_slot(false);
 }
 
 static void _log_rf_stats_if_needed(uint16_t present_count, uint16_t participant_count)
@@ -545,7 +997,11 @@ static void _log_rf_stats_if_needed(uint16_t present_count, uint16_t participant
 static void _log_round_summary_original(void)
 {
     uint8_t p2_node_count = timecast_protocol_p2_get_node_list_len(&g_proto);
-    uint32_t round_duration_ticks = _actual_original_round_duration_ticks();
+    uint32_t now_ticks = radio_util_now_ticks();
+    uint32_t round_duration_ticks =
+        _elapsed_since_ticks(timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto),
+                             now_ticks);
+    uint32_t p2_duration_ticks = _elapsed_since_ticks(g_round_p2_start_ticks, now_ticks);
     uint16_t present_count = timecast_store_present_count(&g_store);
     uint16_t participant_count = timecast_store_participant_count(&g_store);
     uint32_t p2_slot_ticks = _fixed_p2_slot_ticks();
@@ -571,7 +1027,7 @@ static void _log_round_summary_original(void)
            ",rx=%" PRIu32 ",ign=%" PRIu32
            ",p2rx=%" PRIu32 ",p2store=%" PRIu32
            ",present=%u/%u,p2n=%u"
-           ",p1slot=%u,p2slot=%" PRIu32 ",rdu=%" PRIu32
+           ",p1slot=%u,p2slot=%" PRIu32 ",rdu=%" PRIu32 ",p2rdu=%" PRIu32
            ",tref=%" PRIu32 ",p2start=%" PRIu32
            ",tcofs=%" PRIu32 ",tcs=%" PRIu32,
            (unsigned)TC_NODE_ID,
@@ -591,8 +1047,9 @@ static void _log_round_summary_original(void)
            (unsigned)P1_SLOT_US,
            TCAST_TIMER_TICKS_TO_US(p2_slot_ticks),
            TCAST_TIMER_TICKS_TO_US(round_duration_ticks),
+           TCAST_TIMER_TICKS_TO_US(p2_duration_ticks),
            TCAST_TIMER_TICKS_TO_US(timecast_protocol_p1_get_tref_local_ticks(&g_proto)),
-           TCAST_TIMER_TICKS_TO_US(_original_p2_start_ticks()),
+           TCAST_TIMER_TICKS_TO_US(g_round_p2_start_ticks),
            TCAST_TIMER_TICKS_TO_US(g_proto_cfg.p1_rx_ts_to_slot_start_ticks),
            g_p1_offset_sample_count);
     if (has_errors) {
@@ -627,10 +1084,15 @@ static void _log_round_summary_original(void)
 static void _log_round_summary_pre_p2(void)
 {
     uint8_t p2_node_count = timecast_protocol_p2_get_node_list_len(&g_proto);
-    uint32_t round_duration_ticks = _actual_pre_p2_round_duration_ticks();
+    uint8_t local_pending_updates = _local_pending_update_count();
+    uint32_t now_ticks = radio_util_now_ticks();
+    uint32_t round_duration_ticks =
+        _elapsed_since_ticks(timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto),
+                             now_ticks);
+    uint32_t p2_duration_ticks = _elapsed_since_ticks(g_round_p2_start_ticks, now_ticks);
     uint16_t present_count = timecast_store_present_count(&g_store);
     uint16_t participant_count = timecast_store_participant_count(&g_store);
-    uint32_t p2_slot_ticks = _estimated_pre_p2_p2_slot_ticks(_is_master());
+    uint32_t p2_slot_ticks = timecast_protocol_p2_get_slot_ticks(&g_proto, &g_proto_cfg);
     uint32_t pre_p2_reject_total = g_proto.pre_p2.reject_decode +
                                    g_proto.pre_p2.reject_mode +
                                    g_proto.pre_p2.reject_len +
@@ -657,14 +1119,23 @@ static void _log_round_summary_pre_p2(void)
                       (g_proto.p2.slot_misses > 0U) ||
                       (g_proto.p2.rx_ignored > 0U) ||
                       (p2_reject_total > 0U);
+    bool log_update_state = g_round_pre_requested ||
+                            g_round_pre_commit_enabled ||
+                            g_round_pre_commit_applied ||
+                            g_update_request_latched ||
+                            (local_pending_updates > 0U) ||
+                            g_run_pre_next_round;
+    char committed_class_map[TIMECAST_STORE_MAX_NODES + 1];
+    char desired_class_map[TIMECAST_STORE_MAX_NODES + 1];
 
     printf("[timecast] round{id=%u,role=%s,round=%" PRIu32
            ",epoch=%" PRIu32 ",joined=%u,hop=%u,relay=%" PRId16
            ",rx=%" PRIu32 ",ign=%" PRIu32
+           ",pre=%u,pc=%u,upd=%u"
            ",pp2=%u/%u,pp2rx=%" PRIu32
            ",p2rx=%" PRIu32 ",p2store=%" PRIu32
            ",present=%u/%u,p2n=%u"
-           ",p1slot=%u,pp2sub=%u,p2slot=%" PRIu32 ",rdu=%" PRIu32
+           ",p1slot=%u,pp2sub=%u,p2slot=%" PRIu32 ",rdu=%" PRIu32 ",p2rdu=%" PRIu32
            ",tref=%" PRIu32 ",p2start=%" PRIu32
            ",tcofs=%" PRIu32 ",tcs=%" PRIu32,
            (unsigned)TC_NODE_ID,
@@ -676,6 +1147,9 @@ static void _log_round_summary_pre_p2(void)
            g_proto.p1.relay_cnt,
            g_proto.rx_valid,
            g_proto.rx_ignored,
+           (unsigned)g_round_pre_requested,
+           (unsigned)g_round_pre_commit_applied,
+           (unsigned)g_update_request_latched,
            (unsigned)g_proto.pre_p2.known_count,
            (unsigned)p2_node_count,
            g_proto.pre_p2.rx_valid,
@@ -688,8 +1162,9 @@ static void _log_round_summary_pre_p2(void)
            (unsigned)PRE_P2_SUBSLOT_PERIOD_US,
            TCAST_TIMER_TICKS_TO_US(p2_slot_ticks),
            TCAST_TIMER_TICKS_TO_US(round_duration_ticks),
+           TCAST_TIMER_TICKS_TO_US(p2_duration_ticks),
            TCAST_TIMER_TICKS_TO_US(timecast_protocol_p1_get_tref_local_ticks(&g_proto)),
-           TCAST_TIMER_TICKS_TO_US(_pre_p2_p2_start_ticks()),
+           TCAST_TIMER_TICKS_TO_US(g_round_p2_start_ticks),
            TCAST_TIMER_TICKS_TO_US(g_proto_cfg.p1_rx_ts_to_slot_start_ticks),
            g_p1_offset_sample_count);
     if (has_errors) {
@@ -731,6 +1206,19 @@ static void _log_round_summary_pre_p2(void)
                    g_proto.p2.reject_present);
         }
     }
+    if (log_update_state) {
+        _format_class_map(committed_class_map, sizeof(committed_class_map),
+                          g_committed_class, false);
+        _format_class_map(desired_class_map, sizeof(desired_class_map),
+                          NULL, true);
+        printf(",u={loc=%u,next=%u,pcrx=%" PRIu32 ",pchave=%u,cc=%s,dc=%s}",
+               (unsigned)local_pending_updates,
+               (unsigned)g_run_pre_next_round,
+               g_pre_commit.rx_valid,
+               (unsigned)g_pre_commit.have_schedule,
+               committed_class_map,
+               desired_class_map);
+    }
     _log_rf_stats_if_needed(present_count, participant_count);
     printf("}\n");
 }
@@ -739,9 +1227,10 @@ static void _handle_p1_rx(const tta_event_t *event)
 {
     timecast_p1_sync_frame_t frame;
 
-
     if (timecast_packet_decode_p1_sync(event->payload, event->payload_len, &frame) &&
         timecast_protocol_p1_handle_rx(&g_proto, &frame, event->timestamp_tick, &g_proto_cfg)) {
+        g_run_pre_local = ((frame.flags & TIMECAST_PACKET_P1_FLAG_RUN_PRE) != 0U);
+        g_round_pre_requested = g_run_pre_local;
         g_proto.rx_valid++;
         return;
     }
@@ -751,10 +1240,22 @@ static void _handle_p1_rx(const tta_event_t *event)
 
 static void _handle_pre_p2_rx(const tta_event_t *event)
 {
+    uint8_t class_id;
     uint8_t p2_payload_len;
 
-    if (!timecast_packet_decode_pre_p2_ctrl(event->payload, event->payload_len, &p2_payload_len)) {
+    if (!timecast_packet_decode_pre_p2_ctrl(event->payload, event->payload_len, &class_id)) {
         g_proto.pre_p2.reject_decode++;
+        g_proto.pre_p2.rx_ignored++;
+        return;
+    }
+    if (class_id > TCAST_CLASS_MAX_ID) {
+        g_proto.pre_p2.reject_len++;
+        g_proto.pre_p2.rx_ignored++;
+        return;
+    }
+    p2_payload_len = _class_to_payload_len(class_id);
+    if (p2_payload_len == 0U) {
+        g_proto.pre_p2.reject_len++;
         g_proto.pre_p2.rx_ignored++;
         return;
     }
@@ -779,6 +1280,14 @@ static void _handle_p2_rx(const tta_event_t *event)
     if (!timecast_protocol_p2_handle_rx(&g_proto, &g_store, &frame, data,
                                         event->timestamp_tick, &g_proto_cfg)) {
         g_proto.p2.rx_ignored++;
+        return;
+    }
+
+    if ((frame.flags & TIMECAST_PACKET_P2_FLAG_UPDATE_REQ) != 0U) {
+        g_update_request_latched = true;
+        if (_is_master()) {
+            g_run_pre_next_round = true;
+        }
     }
 }
 
@@ -788,7 +1297,6 @@ static void _on_tta_event(const tta_event_t *event, void *arg)
 
     if (event->type == TTA_EVENT_TX_DONE) {
         _finish_p1_offset_sample(event->timestamp_tick);
-        _record_tx_tick(event->timestamp_tick);
         return;
     }
     if (event->type == TTA_EVENT_ERROR) {
@@ -806,6 +1314,11 @@ static void _on_tta_event(const tta_event_t *event, void *arg)
 
     if (g_proto.phase == TIMECAST_PHASE_PRE_P2) {
         _handle_pre_p2_rx(event);
+        return;
+    }
+
+    if (g_proto.phase == TIMECAST_PHASE_PRE_COMMIT) {
+        _handle_pre_commit_rx(event);
         return;
     }
 
@@ -864,8 +1377,16 @@ static void _run_p1_slot(void)
         uint8_t payload[TIMECAST_PACKET_P1_SYNC_PAYLOAD_LEN] = {0};
         uint32_t tx_done_target;
 
-        if (!timecast_protocol_p1_prepare_tx(&g_proto, &g_proto_cfg, &frame) ||
-            !timecast_packet_encode_p1_sync(payload, sizeof(payload), &frame)) {
+        if (!timecast_protocol_p1_prepare_tx(&g_proto, &g_proto_cfg, &frame)) {
+            g_proto.p1_tx_sched_fails++;
+            if (_log_this_error(g_proto.p1_tx_sched_fails)) {
+                puts("[timecast] TX payload build failed");
+            }
+            (void)timecast_protocol_p1_finish_slot(&g_proto, &g_proto_cfg, true);
+            return;
+        }
+        frame.flags = g_run_pre_local ? TIMECAST_PACKET_P1_FLAG_RUN_PRE : 0U;
+        if (!timecast_packet_encode_p1_sync(payload, sizeof(payload), &frame)) {
             g_proto.p1_tx_sched_fails++;
             if (_log_this_error(g_proto.p1_tx_sched_fails)) {
                 puts("[timecast] TX payload build failed");
@@ -930,11 +1451,22 @@ static void _run_pre_p2_subslot(void)
 
     if (tx_slot) {
         uint8_t p2_payload_len;
+        uint8_t class_id;
         uint8_t payload[TIMECAST_PACKET_PRE_P2_CTRL_LEN] = {0};
         uint32_t tx_active_end_ticks;
 
-        if (!timecast_protocol_pre_p2_prepare_tx(&g_proto, &p2_payload_len) ||
-            !timecast_packet_encode_pre_p2_ctrl(payload, sizeof(payload), p2_payload_len)) {
+        if (!timecast_protocol_pre_p2_prepare_tx(&g_proto, &p2_payload_len)) {
+            _wait_until_ticks(subslot_active_end_ticks);
+            (void)timecast_protocol_pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
+            return;
+        }
+        class_id = _payload_len_to_class(p2_payload_len);
+        if (class_id > TCAST_CLASS_MAX_ID) {
+            g_proto.pre_p2_tx_sched_fails++;
+            (void)timecast_protocol_pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
+            return;
+        }
+        if (!timecast_packet_encode_pre_p2_ctrl(payload, sizeof(payload), class_id)) {
             _wait_until_ticks(subslot_active_end_ticks);
             (void)timecast_protocol_pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
@@ -1035,6 +1567,7 @@ static void _run_p2_subslot(void)
             (void)timecast_protocol_p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
         }
+        frame.flags = g_update_request_latched ? TIMECAST_PACKET_P2_FLAG_UPDATE_REQ : 0U;
 
         if (!timecast_packet_encode_p2_data(payload, sizeof(payload), &frame, data_ptr)) {
             g_proto.p2_tx_sched_fails++;
@@ -1107,13 +1640,39 @@ static void _prepare_round(void)
     uint8_t node_id;
 
     g_round_count++;
-    _reset_round_trace();
     tta_driver_get_stats(&g_round_start_stats);
+    memset(&g_pre_commit, 0, sizeof(g_pre_commit));
     timecast_store_clear(&g_store);
     for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
         (void)timecast_store_mark_participant(&g_store, node_id);
     }
+
+    g_round_pre_commit_applied = false;
+    g_round_pre_commit_enabled = false;
+    g_round_pre_commit_slot_ticks = _pre_commit_slot_ticks(g_proto_cfg.p2_node_count);
+    if (_use_pre_p2_mode()) {
+        if (_is_master()) {
+            g_run_pre_local = g_force_initial_pre || g_run_pre_next_round;
+            g_round_pre_requested = g_run_pre_local;
+            g_run_pre_next_round = false;
+            g_force_initial_pre = false;
+        }
+        else {
+            g_run_pre_local = false;
+            g_round_pre_requested = false;
+        }
+    }
+    else {
+        g_run_pre_local = false;
+        g_round_pre_requested = false;
+    }
+
     _refresh_local_payload();
+
+    if (_use_pre_p2_mode() && _is_master() &&
+        g_update_request_latched && !g_round_pre_requested) {
+        g_run_pre_next_round = true;
+    }
 }
 
 static void _run_p1_phase(uint32_t next_master_round_start_ticks)
@@ -1142,7 +1701,8 @@ static void _run_round_original(uint32_t *next_master_round_start_ticks)
     _prepare_round();
     _run_p1_phase(*next_master_round_start_ticks);
 
-    p2_start_ticks = _original_p2_start_ticks();
+    p2_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
+    g_round_p2_start_ticks = p2_start_ticks;
     tta_driver_process();
 
     /* Enter fixed P2 before subslot 0 so the first TX/RX is armed ahead of
@@ -1163,46 +1723,128 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
 {
     uint32_t next_phase_start_ticks;
     uint32_t p2_start_ticks;
+    bool skip_p2 = false;
 
     _prepare_round();
     _run_p1_phase(*next_master_round_start_ticks);
 
     next_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-    timecast_protocol_pre_p2_start(&g_proto, &g_store, next_phase_start_ticks, &g_proto_cfg);
-    while (timecast_protocol_pre_p2_is_active(&g_proto)) {
-        _run_pre_p2_subslot();
-    }
-    p2_start_ticks = _pre_p2_p2_start_ticks();
-    tta_driver_process();
+    if (g_run_pre_local) {
+        uint8_t local_source_id = (uint8_t)TC_NODE_ID;
 
-    /* Enter adaptive P2 before subslot 0 so the first TX/RX is armed ahead of
-     * the common P2 start timestamp. */
-    timecast_protocol_p2_start_pre_p2(&g_proto, p2_start_ticks, &g_proto_cfg);
-    if (!timecast_protocol_pre_p2_is_complete(&g_proto)) {
-        _wait_out_estimated_pre_p2_p2(p2_start_ticks);
+        timecast_protocol_pre_p2_start(&g_proto, &g_store, next_phase_start_ticks, &g_proto_cfg);
+        if ((local_source_id < g_proto_cfg.p2_node_count) &&
+            g_proto.pre_p2.present[local_source_id]) {
+            uint8_t p2_payload_len = _class_to_payload_len(g_local_desired_class);
+
+            if (p2_payload_len == 0U) {
+                g_proto.pre_p2.present[local_source_id] = 0U;
+                if (g_proto.pre_p2.known_count > 0U) {
+                    g_proto.pre_p2.known_count--;
+                }
+                g_proto.pre_p2.complete = false;
+            }
+            else {
+                g_proto.pre_p2.p2_payload_len[local_source_id] = p2_payload_len;
+            }
+        }
+
+        while (timecast_protocol_pre_p2_is_active(&g_proto)) {
+            _run_pre_p2_subslot();
+        }
+
+        p2_start_ticks = timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
+        if (_use_pre_commit_mode()) {
+            bool have_master_schedule = true;
+
+            g_round_pre_commit_enabled = true;
+            if (_is_master()) {
+                have_master_schedule = _build_schedule_from_pre_collect(g_round_schedule_class);
+            }
+            _pre_commit_start(p2_start_ticks,
+                              (_is_master() && have_master_schedule) ?
+                              g_round_schedule_class : NULL);
+            while (g_pre_commit.active) {
+                _run_pre_commit_slot();
+            }
+            p2_start_ticks = _pre_commit_p2_start_ticks();
+            if (g_pre_commit.have_schedule) {
+                _unpack_class_schedule(g_pre_commit.packed_schedule,
+                                       g_proto_cfg.p2_node_count,
+                                       g_round_schedule_class);
+                if (_commit_schedule(g_round_schedule_class) &&
+                    _apply_round_schedule_to_proto(g_round_schedule_class)) {
+                    g_round_pre_commit_applied = true;
+                }
+                else {
+                    skip_p2 = true;
+                    g_update_request_latched = true;
+                }
+            }
+            else {
+                skip_p2 = !_is_master();
+                g_update_request_latched = true;
+            }
+        }
+        else if (timecast_protocol_pre_p2_is_complete(&g_proto)) {
+            if (!(_build_schedule_from_pre_collect(g_round_schedule_class) &&
+                  _commit_schedule(g_round_schedule_class) &&
+                  _apply_round_schedule_to_proto(g_round_schedule_class))) {
+                g_update_request_latched = true;
+                if (!_seed_round_schedule_from_committed()) {
+                    skip_p2 = true;
+                }
+            }
+        }
+        else {
+            if (!_seed_round_schedule_from_committed()) {
+                skip_p2 = true;
+                g_update_request_latched = true;
+            }
+        }
     }
-    while (timecast_protocol_p2_is_active(&g_proto)) {
-        _run_p2_subslot();
+    else {
+        p2_start_ticks = next_phase_start_ticks;
+        if (!_seed_round_schedule_from_committed()) {
+            skip_p2 = true;
+            g_update_request_latched = true;
+        }
+    }
+
+    g_round_p2_start_ticks = p2_start_ticks;
+    tta_driver_process();
+    if (skip_p2) {
+        _wait_out_max_p2(p2_start_ticks);
+    }
+    else {
+        /* Enter adaptive P2 before subslot 0 so the first TX/RX is armed ahead of
+         * the common P2 start timestamp. */
+        timecast_protocol_p2_start_pre_p2(&g_proto, p2_start_ticks, &g_proto_cfg);
+        while (timecast_protocol_p2_is_active(&g_proto)) {
+            _run_p2_subslot();
+        }
     }
 
     _log_round_summary_pre_p2();
 
     if (_is_master()) {
-        *next_master_round_start_ticks += _pre_p2_round_period_ticks();
+        *next_master_round_start_ticks += _improved_round_period_ticks(g_round_pre_requested);
     }
 }
 
 int main(void)
 {
     uint32_t next_master_round_start_ticks;
-    printf("TimeCast start. node_id=%u hop=%u role=%s mode=%s ntx=%u vmod=%u pre_p2=%u app_data=%u payload=%u\n",
+    uint8_t node_id;
+
+    printf("TimeCast start. node_id=%u hop=%u role=%s mode=%s ntx=%u pre_p2=%u pre_commit=%u app_data=%u payload=%u\n",
            (unsigned)TC_NODE_ID,
            (unsigned)g_proto_cfg.local_hop,
            _role_name(),
            _run_mode_name(),
            (unsigned)NTX,
-           (unsigned)TCAST_VIRTUAL_SOURCE_MOD,
            (unsigned)_use_pre_p2_mode(),
+           (unsigned)_use_pre_commit_mode(),
            (unsigned)TCAST_APP_DATA_LEN,
            (unsigned)TCAST_LOCAL_PAYLOAD_LEN);
     printf("[timecast] timing: p1_slot=%u us pre_p2_subslot=%u us p2_subslot=%u us "
@@ -1235,13 +1877,20 @@ int main(void)
     timecast_store_init(&g_store, (uint8_t)TC_NODE_ID);
     (void)timecast_store_mark_participant(&g_store, (uint8_t)TC_NODE_ID);
     timecast_protocol_init(&g_proto, _is_master());
+    for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
+        g_committed_class[node_id] = TCAST_CLASS_MAX_ID;
+        g_round_schedule_class[node_id] = TCAST_CLASS_MAX_ID;
+    }
     _refresh_local_payload();
+    if (!_commit_schedule(g_committed_class)) {
+        puts("[timecast] initial schedule invalid");
+        return 1;
+    }
 
     g_round_count = 0U;
     g_p1_offset_sample_count = 0U;
     g_p1_tx_slot_start_ticks = 0U;
     g_p1_tx_cal_pending = false;
-    _reset_round_trace();
     next_master_round_start_ticks = radio_util_now_ticks() +
                                     TCAST_US_TO_TIMER_TICKS(TCAST_MASTER_START_DELAY_US);
 
