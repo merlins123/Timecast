@@ -119,6 +119,9 @@
 #ifndef TCAST_P1_SCAN_LOG_INTERVAL_US
 #define TCAST_P1_SCAN_LOG_INTERVAL_US (1000000U)
 #endif
+#ifndef TCAST_MASTER_P2_INCOMPLETE_PRE_THRESHOLD
+#define TCAST_MASTER_P2_INCOMPLETE_PRE_THRESHOLD (3U)
+#endif
 
 #define P1_SLOT_US            (TCAST_P1_SLOT_US)
 #define PRE_P2_SUBSLOT_US     (TCAST_PRE_P2_SUBSLOT_US)
@@ -172,11 +175,18 @@ static uint8_t g_local_desired_class;
 static uint8_t g_local_committed_payload_len;
 static uint8_t g_local_committed_payload[TIMECAST_STORE_MAX_DATA_LEN];
 static uint8_t g_round_schedule_class[TIMECAST_STORE_MAX_NODES];
-static bool g_update_request_latched;
-static bool g_run_pre_local;
-static bool g_run_pre_next_round;
-static bool g_force_initial_pre = true;
-static bool g_round_pre_requested;
+/* Update control state:
+ * - g_update_pending_latched survives across rounds until a committed schedule
+ *   catches up with the local desired class.
+ * - g_round_tx_update_req is frozen after P1, so P2 packet flags stay stable
+ *   for the whole round.
+ */
+static bool g_update_pending_latched;
+static bool g_round_tx_update_req;
+static bool g_round_run_pre;
+static bool g_master_run_pre_next_round;
+static bool g_master_force_initial_pre = true;
+static uint32_t g_master_p2_incomplete_rounds;
 static bool g_round_pre_commit_applied;
 static bool g_round_pre_commit_enabled;
 static uint32_t g_round_pre_commit_slot_ticks;
@@ -270,13 +280,36 @@ static inline uint32_t _p2_max_duration_ticks(uint8_t node_count)
              g_proto_cfg.p2_guard_ticks));
 }
 
+static inline uint8_t _class_to_payload_len(uint8_t class_id);
+
+static inline uint32_t _p2_duration_from_classes_ticks(const uint8_t *classes, uint8_t node_count)
+{
+    uint8_t source_id;
+    uint32_t slot_ticks = 0U;
+
+    if (!classes) {
+        return 0U;
+    }
+
+    for (source_id = 0U; source_id < node_count; source_id++) {
+        uint8_t p2_payload_len = _class_to_payload_len(classes[source_id]);
+
+        if (p2_payload_len == 0U) {
+            return 0U;
+        }
+        slot_ticks += g_proto_cfg.p2_payload_base_ticks +
+                      ((uint32_t)p2_payload_len * g_proto_cfg.p2_payload_byte_ticks) +
+                      g_proto_cfg.p2_guard_ticks;
+    }
+
+    return (uint32_t)(2U * NTX) * slot_ticks;
+}
+
 static inline uint32_t _fixed_p2_slot_ticks(void)
 {
     return (uint32_t)g_proto_cfg.p2_node_count *
            (g_proto_cfg.p2_subslot_ticks + g_proto_cfg.p2_guard_ticks);
 }
-
-static inline uint8_t _class_to_payload_len(uint8_t class_id);
 
 static uint32_t _original_p2_duration_ticks(void)
 {
@@ -433,6 +466,16 @@ static inline uint8_t _payload_data_len_to_class(uint8_t data_len)
     return _payload_len_to_class((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + data_len));
 }
 
+static inline uint8_t _minimum_payload_class(void)
+{
+    return _payload_data_len_to_class(TCAST_LOCAL_PAYLOAD_META_LEN);
+}
+
+static inline uint8_t _initial_committed_class(void)
+{
+    return _is_master() ? TCAST_CLASS_MAX_ID : _minimum_payload_class();
+}
+
 static inline uint8_t _local_source_id(void)
 {
     return (uint8_t)TC_NODE_ID;
@@ -574,15 +617,12 @@ static uint8_t _local_payload_len_for_source(uint8_t source_id)
     return TCAST_LOCAL_PAYLOAD_LEN;
 }
 
-static uint8_t _build_local_payload(uint8_t source_id, uint8_t *dst)
+static uint8_t _build_local_payload_with_len(uint8_t source_id, uint8_t *dst, uint8_t payload_len)
 {
-    uint8_t payload_len;
-
     if (!dst) {
         return 0U;
     }
 
-    payload_len = _local_payload_len_for_source(source_id);
     if ((payload_len < TCAST_LOCAL_PAYLOAD_META_LEN) ||
         (payload_len > TIMECAST_STORE_MAX_DATA_LEN)) {
         return 0U;
@@ -603,24 +643,21 @@ static uint8_t _build_local_payload(uint8_t source_id, uint8_t *dst)
     return payload_len;
 }
 
-static bool _pack_class_schedule(const uint8_t *classes, uint8_t node_count,
+static uint8_t _build_local_payload(uint8_t source_id, uint8_t *dst)
+{
+    return _build_local_payload_with_len(source_id, dst, _local_payload_len_for_source(source_id));
+}
+
+static void _pack_class_schedule(const uint8_t *classes, uint8_t node_count,
                                  uint8_t *packed_out, uint8_t *packed_len_out)
 {
     uint8_t source_id;
     uint8_t packed_len = (uint8_t)TCAST_PACKED_CLASS_LEN(node_count);
 
-    if (!classes || !packed_out || !packed_len_out) {
-        return false;
-    }
-
     memset(packed_out, 0, packed_len);
     for (source_id = 0U; source_id < node_count; source_id++) {
         uint8_t class_id = classes[source_id];
         uint8_t byte_idx = (uint8_t)(source_id / 2U);
-
-        if (class_id > TCAST_CLASS_MAX_ID) {
-            return false;
-        }
 
         if ((source_id & 0x1U) == 0U) {
             packed_out[byte_idx] |= class_id;
@@ -631,7 +668,6 @@ static bool _pack_class_schedule(const uint8_t *classes, uint8_t node_count,
     }
 
     *packed_len_out = packed_len;
-    return true;
 }
 
 static void _unpack_class_schedule(const uint8_t *packed, uint8_t node_count, uint8_t *classes_out)
@@ -654,7 +690,7 @@ static void _unpack_class_schedule(const uint8_t *packed, uint8_t node_count, ui
     }
 }
 
-static bool _seed_round_schedule_from_committed(void)
+static void _seed_round_schedule_from_committed(void)
 {
     uint8_t source_id;
 
@@ -664,48 +700,30 @@ static bool _seed_round_schedule_from_committed(void)
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         uint8_t p2_payload_len = _class_to_payload_len(g_committed_class[source_id]);
 
-        if (p2_payload_len == 0U) {
-            return false;
-        }
         g_proto.pre_p2.present[source_id] = 1U;
         g_proto.pre_p2.p2_payload_len[source_id] = p2_payload_len;
     }
-
-    return true;
 }
 
-static bool _build_schedule_from_pre_collect(uint8_t *classes_out)
+static void _build_schedule_from_pre_collect(uint8_t *classes_out)
 {
     uint8_t source_id;
-
-    if (!classes_out) {
-        return false;
-    }
 
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         if (timecast_protocol_pre_p2_has_p2_payload_len(&g_proto, source_id)) {
             uint8_t class_id = _payload_len_to_class(g_proto.pre_p2.p2_payload_len[source_id]);
 
-            if (class_id > TCAST_CLASS_MAX_ID) {
-                return false;
-            }
             classes_out[source_id] = class_id;
         }
         else {
             classes_out[source_id] = TCAST_CLASS_MAX_ID;
         }
     }
-
-    return true;
 }
 
-static bool _apply_round_schedule_to_proto(const uint8_t *classes)
+static void _apply_round_schedule_to_proto(const uint8_t *classes)
 {
     uint8_t source_id;
-
-    if (!classes) {
-        return false;
-    }
 
     g_proto.pre_p2.node_count = g_proto_cfg.p2_node_count;
     g_proto.pre_p2.complete = true;
@@ -713,14 +731,9 @@ static bool _apply_round_schedule_to_proto(const uint8_t *classes)
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         uint8_t p2_payload_len = _class_to_payload_len(classes[source_id]);
 
-        if (p2_payload_len == 0U) {
-            return false;
-        }
         g_proto.pre_p2.present[source_id] = 1U;
         g_proto.pre_p2.p2_payload_len[source_id] = p2_payload_len;
     }
-
-    return true;
 }
 
 static bool _local_update_pending(void)
@@ -728,22 +741,41 @@ static bool _local_update_pending(void)
     return (_local_pending_update_count() > 0U);
 }
 
-static bool _commit_schedule(const uint8_t *classes)
+static void _latch_update_request(void)
+{
+    g_update_pending_latched = true;
+}
+
+static void _refresh_update_latch_from_committed_schedule(void)
+{
+    g_update_pending_latched = _local_update_pending();
+}
+
+static void _freeze_round_update_advertisement(void)
+{
+    g_round_tx_update_req = g_update_pending_latched && !g_round_run_pre;
+}
+
+static bool _local_packet_should_request_update(uint8_t owner_id)
+{
+    return (owner_id == _local_source_id()) && g_round_tx_update_req;
+}
+
+static void _master_request_pre_next_round(void)
+{
+    if (_is_master()) {
+        g_master_run_pre_next_round = true;
+    }
+}
+
+static void _commit_schedule(const uint8_t *classes)
 {
     uint8_t source_id;
     uint8_t local_source_id = _local_source_id();
     uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
+    uint8_t committed_p2_payload_len;
+    uint8_t committed_data_len;
     uint8_t payload_len;
-
-    if (!classes) {
-        return false;
-    }
-
-    for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
-        if (classes[source_id] > TCAST_CLASS_MAX_ID) {
-            return false;
-        }
-    }
 
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         g_committed_class[source_id] = classes[source_id];
@@ -751,13 +783,25 @@ static bool _commit_schedule(const uint8_t *classes)
     }
 
     if (local_source_id < g_proto_cfg.p2_node_count) {
-        payload_len = _build_local_payload(local_source_id, payload);
+        committed_p2_payload_len = _class_to_payload_len(classes[local_source_id]);
+        committed_data_len = (uint8_t)(committed_p2_payload_len -
+                                       TIMECAST_PACKET_P2_DATA_HDR_LEN);
+        payload_len = _local_payload_len_for_source(local_source_id);
+        if (payload_len > committed_data_len) {
+            payload_len = committed_data_len;
+        }
+        payload_len = _build_local_payload_with_len(local_source_id, payload, payload_len);
         memcpy(g_local_committed_payload, payload, payload_len);
         g_local_committed_payload_len = payload_len;
     }
 
-    g_update_request_latched = _local_update_pending();
-    return true;
+    _refresh_update_latch_from_committed_schedule();
+}
+
+static void _commit_round_schedule(const uint8_t *classes)
+{
+    _commit_schedule(classes);
+    _apply_round_schedule_to_proto(classes);
 }
 
 static void _refresh_local_payload(void)
@@ -775,17 +819,17 @@ static void _refresh_local_payload(void)
     payload_len = _build_local_payload(source_id, payload);
     payload_class = _payload_data_len_to_class(payload_len);
     if (payload_class > TCAST_CLASS_MAX_ID) {
-        g_update_request_latched = true;
+        _latch_update_request();
         return;
     }
     g_local_desired_class = payload_class;
     if (payload_class != g_committed_class[source_id]) {
-        g_update_request_latched = true;
+        _latch_update_request();
     }
 
     committed_payload_len = _class_to_payload_len(g_committed_class[source_id]);
     if (committed_payload_len == 0U) {
-        g_update_request_latched = true;
+        _latch_update_request();
         return;
     }
     if ((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + payload_len) <= committed_payload_len) {
@@ -798,9 +842,17 @@ static void _refresh_local_payload(void)
     }
 }
 
-static void _wait_out_max_p2(uint32_t p2_start_ticks)
+static void _wait_out_p2_schedule(uint32_t p2_start_ticks)
 {
-    uint32_t p2_end_ticks = p2_start_ticks + _p2_max_duration_ticks(g_proto_cfg.p2_node_count);
+    uint32_t p2_duration_ticks =
+        _p2_duration_from_classes_ticks(g_committed_class, g_proto_cfg.p2_node_count);
+    uint32_t p2_end_ticks;
+
+    if (p2_duration_ticks == 0U) {
+        p2_duration_ticks = _p2_max_duration_ticks(g_proto_cfg.p2_node_count);
+    }
+
+    p2_end_ticks = p2_start_ticks + p2_duration_ticks;
 
     if ((int32_t)(p2_end_ticks - radio_util_now_ticks()) > 0) {
         _wait_until_ticks(p2_end_ticks);
@@ -819,7 +871,7 @@ static uint32_t _elapsed_since_ticks(uint32_t start_ticks, uint32_t now_ticks)
 static void _pre_commit_start(uint32_t start_local_ticks, const uint8_t *classes)
 {
     memset(&g_pre_commit, 0, sizeof(g_pre_commit));
-    g_pre_commit.active = g_run_pre_local && g_round_pre_commit_enabled;
+    g_pre_commit.active = g_round_run_pre && g_round_pre_commit_enabled;
     g_pre_commit.start_local_ticks = start_local_ticks;
     g_pre_commit.slot_ticks = _pre_commit_slot_ticks(g_proto_cfg.p2_node_count);
     if (g_pre_commit.active) {
@@ -829,11 +881,8 @@ static void _pre_commit_start(uint32_t start_local_ticks, const uint8_t *classes
         return;
     }
 
-    if (!_pack_class_schedule(classes, g_proto_cfg.p2_node_count,
-                              g_pre_commit.packed_schedule, &g_pre_commit.packed_len)) {
-        g_pre_commit.active = false;
-        return;
-    }
+    _pack_class_schedule(classes, g_proto_cfg.p2_node_count,
+                         g_pre_commit.packed_schedule, &g_pre_commit.packed_len);
     g_pre_commit.have_schedule = true;
     g_pre_commit.flag_tx = true;
     g_pre_commit.relay_cnt = -1;
@@ -889,10 +938,10 @@ static void _handle_pre_commit_rx(const tta_event_t *event)
     g_pre_commit.rx_valid++;
 }
 
-static bool _pre_commit_finish_slot(bool did_tx)
+static void _pre_commit_finish_slot(bool did_tx)
 {
     if (!g_pre_commit.active) {
-        return false;
+        return;
     }
 
     if (did_tx) {
@@ -906,8 +955,6 @@ static bool _pre_commit_finish_slot(bool did_tx)
     if (g_pre_commit.slot_idx >= (uint8_t)(2U * NTX)) {
         g_pre_commit.active = false;
     }
-
-    return g_pre_commit.active;
 }
 
 static void _run_pre_commit_slot(void)
@@ -925,7 +972,7 @@ static void _run_pre_commit_slot(void)
     }
 
     if ((int32_t)(now_ticks - slot_start_ticks) >= 0) {
-        (void)_pre_commit_finish_slot(do_tx);
+        _pre_commit_finish_slot(do_tx);
         return;
     }
 
@@ -939,13 +986,13 @@ static void _run_pre_commit_slot(void)
         if (!timecast_packet_encode_pre_commit(payload, sizeof(payload), &frame,
                                                g_pre_commit.packed_schedule,
                                                g_pre_commit.packed_len)) {
-            (void)_pre_commit_finish_slot(true);
+            _pre_commit_finish_slot(true);
             return;
         }
         if (tta_driver_tx(payload,
                           TIMECAST_PACKET_PRE_COMMIT_BASE_LEN + g_pre_commit.packed_len,
                           slot_start_ticks) < 0) {
-            (void)_pre_commit_finish_slot(true);
+            _pre_commit_finish_slot(true);
             return;
         }
 
@@ -960,13 +1007,13 @@ static void _run_pre_commit_slot(void)
         }
         _wait_until_ticks(tx_active_end_ticks);
         g_pre_commit.ntx_done++;
-        (void)_pre_commit_finish_slot(true);
+        _pre_commit_finish_slot(true);
         return;
     }
 
     _wait_for_arm(slot_start_ticks, TCAST_US_TO_TIMER_TICKS(TCAST_P1_RX_LEAD_US));
     if (_try_rx_enable() < 0) {
-        (void)_pre_commit_finish_slot(false);
+        _pre_commit_finish_slot(false);
         return;
     }
 
@@ -975,7 +1022,7 @@ static void _run_pre_commit_slot(void)
         (void)_drain_rx_until_idle(slot_end_ticks);
     }
 
-    (void)_pre_commit_finish_slot(false);
+    _pre_commit_finish_slot(false);
 }
 
 static void _log_rf_stats_if_needed(uint16_t present_count, uint16_t participant_count)
@@ -1119,12 +1166,13 @@ static void _log_round_summary_pre_p2(void)
                       (g_proto.p2.slot_misses > 0U) ||
                       (g_proto.p2.rx_ignored > 0U) ||
                       (p2_reject_total > 0U);
-    bool log_update_state = g_round_pre_requested ||
+    bool log_update_state = g_round_run_pre ||
                             g_round_pre_commit_enabled ||
                             g_round_pre_commit_applied ||
-                            g_update_request_latched ||
+                            g_update_pending_latched ||
                             (local_pending_updates > 0U) ||
-                            g_run_pre_next_round;
+                            g_master_run_pre_next_round ||
+                            (g_master_p2_incomplete_rounds > 0U);
     char committed_class_map[TIMECAST_STORE_MAX_NODES + 1];
     char desired_class_map[TIMECAST_STORE_MAX_NODES + 1];
 
@@ -1147,9 +1195,9 @@ static void _log_round_summary_pre_p2(void)
            g_proto.p1.relay_cnt,
            g_proto.rx_valid,
            g_proto.rx_ignored,
-           (unsigned)g_round_pre_requested,
+           (unsigned)g_round_run_pre,
            (unsigned)g_round_pre_commit_applied,
-           (unsigned)g_update_request_latched,
+           (unsigned)g_update_pending_latched,
            (unsigned)g_proto.pre_p2.known_count,
            (unsigned)p2_node_count,
            g_proto.pre_p2.rx_valid,
@@ -1211,9 +1259,11 @@ static void _log_round_summary_pre_p2(void)
                           g_committed_class, false);
         _format_class_map(desired_class_map, sizeof(desired_class_map),
                           NULL, true);
-        printf(",u={loc=%u,next=%u,pcrx=%" PRIu32 ",pchave=%u,cc=%s,dc=%s}",
+        printf(",u={loc=%u,next=%u,inc=%" PRIu32
+               ",pcrx=%" PRIu32 ",pchave=%u,cc=%s,dc=%s}",
                (unsigned)local_pending_updates,
-               (unsigned)g_run_pre_next_round,
+               (unsigned)g_master_run_pre_next_round,
+               g_master_p2_incomplete_rounds,
                g_pre_commit.rx_valid,
                (unsigned)g_pre_commit.have_schedule,
                committed_class_map,
@@ -1229,8 +1279,7 @@ static void _handle_p1_rx(const tta_event_t *event)
 
     if (timecast_packet_decode_p1_sync(event->payload, event->payload_len, &frame) &&
         timecast_protocol_p1_handle_rx(&g_proto, &frame, event->timestamp_tick, &g_proto_cfg)) {
-        g_run_pre_local = ((frame.flags & TIMECAST_PACKET_P1_FLAG_RUN_PRE) != 0U);
-        g_round_pre_requested = g_run_pre_local;
+        g_round_run_pre = ((frame.flags & TIMECAST_PACKET_P1_FLAG_RUN_PRE) != 0U);
         g_proto.rx_valid++;
         return;
     }
@@ -1284,10 +1333,8 @@ static void _handle_p2_rx(const tta_event_t *event)
     }
 
     if ((frame.flags & TIMECAST_PACKET_P2_FLAG_UPDATE_REQ) != 0U) {
-        g_update_request_latched = true;
-        if (_is_master()) {
-            g_run_pre_next_round = true;
-        }
+        _latch_update_request();
+        _master_request_pre_next_round();
     }
 }
 
@@ -1385,7 +1432,7 @@ static void _run_p1_slot(void)
             (void)timecast_protocol_p1_finish_slot(&g_proto, &g_proto_cfg, true);
             return;
         }
-        frame.flags = g_run_pre_local ? TIMECAST_PACKET_P1_FLAG_RUN_PRE : 0U;
+        frame.flags = g_round_run_pre ? TIMECAST_PACKET_P1_FLAG_RUN_PRE : 0U;
         if (!timecast_packet_encode_p1_sync(payload, sizeof(payload), &frame)) {
             g_proto.p1_tx_sched_fails++;
             if (_log_this_error(g_proto.p1_tx_sched_fails)) {
@@ -1567,7 +1614,8 @@ static void _run_p2_subslot(void)
             (void)timecast_protocol_p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
         }
-        frame.flags = g_update_request_latched ? TIMECAST_PACKET_P2_FLAG_UPDATE_REQ : 0U;
+        frame.flags = _local_packet_should_request_update(owner_id) ?
+                      TIMECAST_PACKET_P2_FLAG_UPDATE_REQ : 0U;
 
         if (!timecast_packet_encode_p2_data(payload, sizeof(payload), &frame, data_ptr)) {
             g_proto.p2_tx_sched_fails++;
@@ -1635,44 +1683,87 @@ static void _run_p2_subslot(void)
     (void)timecast_protocol_p2_finish_subslot(&g_proto, &g_proto_cfg);
 }
 
-static void _prepare_round(void)
+static void _mark_configured_participants(void)
 {
     uint8_t node_id;
 
-    g_round_count++;
-    tta_driver_get_stats(&g_round_start_stats);
-    memset(&g_pre_commit, 0, sizeof(g_pre_commit));
     timecast_store_clear(&g_store);
     for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
         (void)timecast_store_mark_participant(&g_store, node_id);
     }
+}
+
+static void _reset_round_runtime_state(void)
+{
+    tta_driver_get_stats(&g_round_start_stats);
+    memset(&g_pre_commit, 0, sizeof(g_pre_commit));
+    g_round_tx_update_req = false;
+    _mark_configured_participants();
 
     g_round_pre_commit_applied = false;
     g_round_pre_commit_enabled = false;
     g_round_pre_commit_slot_ticks = _pre_commit_slot_ticks(g_proto_cfg.p2_node_count);
+}
+
+static void _select_pre_p2_for_round(void)
+{
     if (_use_pre_p2_mode()) {
         if (_is_master()) {
-            g_run_pre_local = g_force_initial_pre || g_run_pre_next_round;
-            g_round_pre_requested = g_run_pre_local;
-            g_run_pre_next_round = false;
-            g_force_initial_pre = false;
+            g_round_run_pre = g_master_force_initial_pre || g_master_run_pre_next_round;
+            g_master_run_pre_next_round = false;
+            g_master_force_initial_pre = false;
         }
         else {
-            g_run_pre_local = false;
-            g_round_pre_requested = false;
+            g_round_run_pre = false;
         }
     }
     else {
-        g_run_pre_local = false;
-        g_round_pre_requested = false;
+        g_round_run_pre = false;
     }
+}
 
-    _refresh_local_payload();
-
+static void _master_queue_pre_if_update_is_pending(void)
+{
     if (_use_pre_p2_mode() && _is_master() &&
-        g_update_request_latched && !g_round_pre_requested) {
-        g_run_pre_next_round = true;
+        g_update_pending_latched && !g_round_run_pre) {
+        _master_request_pre_next_round();
     }
+}
+
+static bool _p2_chain_is_complete(void)
+{
+    return timecast_store_present_count(&g_store) >= timecast_store_participant_count(&g_store);
+}
+
+static void _master_track_p2_completeness(void)
+{
+    if (!_use_pre_p2_mode() || !_is_master() ||
+        (TCAST_MASTER_P2_INCOMPLETE_PRE_THRESHOLD == 0U)) {
+        return;
+    }
+
+    if (_p2_chain_is_complete()) {
+        /* Only reset the reconnect counter here.  Do not clear
+         * g_master_run_pre_next_round: an update request may already have
+         * queued pre for the next round. */
+        g_master_p2_incomplete_rounds = 0U;
+        return;
+    }
+
+    g_master_p2_incomplete_rounds++;
+    if (g_master_p2_incomplete_rounds >= TCAST_MASTER_P2_INCOMPLETE_PRE_THRESHOLD) {
+        _master_request_pre_next_round();
+        g_master_p2_incomplete_rounds = 0U;
+    }
+}
+
+static void _prepare_round(void)
+{
+    g_round_count++;
+    _reset_round_runtime_state();
+    _select_pre_p2_for_round();
+    _refresh_local_payload();
+    _master_queue_pre_if_update_is_pending();
 }
 
 static void _run_p1_phase(uint32_t next_master_round_start_ticks)
@@ -1719,6 +1810,41 @@ static void _run_round_original(uint32_t *next_master_round_start_ticks)
     }
 }
 
+static void _override_local_pre_p2_payload_len(void)
+{
+    uint8_t local_source_id = _local_source_id();
+    uint8_t p2_payload_len;
+
+    if ((local_source_id >= g_proto_cfg.p2_node_count) ||
+        !g_proto.pre_p2.present[local_source_id]) {
+        return;
+    }
+
+    p2_payload_len = _class_to_payload_len(g_local_desired_class);
+    if (p2_payload_len == 0U) {
+        g_proto.pre_p2.present[local_source_id] = 0U;
+        if (g_proto.pre_p2.known_count > 0U) {
+            g_proto.pre_p2.known_count--;
+        }
+        g_proto.pre_p2.complete = false;
+        return;
+    }
+
+    g_proto.pre_p2.p2_payload_len[local_source_id] = p2_payload_len;
+}
+
+static uint32_t _run_pre_p2_collect(uint32_t start_ticks)
+{
+    timecast_protocol_pre_p2_start(&g_proto, &g_store, start_ticks, &g_proto_cfg);
+    _override_local_pre_p2_payload_len();
+
+    while (timecast_protocol_pre_p2_is_active(&g_proto)) {
+        _run_pre_p2_subslot();
+    }
+
+    return timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
+}
+
 static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
 {
     uint32_t next_phase_start_ticks;
@@ -1728,42 +1854,18 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
     _prepare_round();
     _run_p1_phase(*next_master_round_start_ticks);
 
+    _freeze_round_update_advertisement();
+
     next_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
-    if (g_run_pre_local) {
-        uint8_t local_source_id = (uint8_t)TC_NODE_ID;
-
-        timecast_protocol_pre_p2_start(&g_proto, &g_store, next_phase_start_ticks, &g_proto_cfg);
-        if ((local_source_id < g_proto_cfg.p2_node_count) &&
-            g_proto.pre_p2.present[local_source_id]) {
-            uint8_t p2_payload_len = _class_to_payload_len(g_local_desired_class);
-
-            if (p2_payload_len == 0U) {
-                g_proto.pre_p2.present[local_source_id] = 0U;
-                if (g_proto.pre_p2.known_count > 0U) {
-                    g_proto.pre_p2.known_count--;
-                }
-                g_proto.pre_p2.complete = false;
-            }
-            else {
-                g_proto.pre_p2.p2_payload_len[local_source_id] = p2_payload_len;
-            }
-        }
-
-        while (timecast_protocol_pre_p2_is_active(&g_proto)) {
-            _run_pre_p2_subslot();
-        }
-
-        p2_start_ticks = timecast_protocol_pre_p2_get_p2_start_local_ticks(&g_proto);
+    if (g_round_run_pre) {
+        p2_start_ticks = _run_pre_p2_collect(next_phase_start_ticks);
         if (_use_pre_commit_mode()) {
-            bool have_master_schedule = true;
-
             g_round_pre_commit_enabled = true;
             if (_is_master()) {
-                have_master_schedule = _build_schedule_from_pre_collect(g_round_schedule_class);
+                _build_schedule_from_pre_collect(g_round_schedule_class);
             }
             _pre_commit_start(p2_start_ticks,
-                              (_is_master() && have_master_schedule) ?
-                              g_round_schedule_class : NULL);
+                              _is_master() ? g_round_schedule_class : NULL);
             while (g_pre_commit.active) {
                 _run_pre_commit_slot();
             }
@@ -1772,49 +1874,32 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
                 _unpack_class_schedule(g_pre_commit.packed_schedule,
                                        g_proto_cfg.p2_node_count,
                                        g_round_schedule_class);
-                if (_commit_schedule(g_round_schedule_class) &&
-                    _apply_round_schedule_to_proto(g_round_schedule_class)) {
-                    g_round_pre_commit_applied = true;
-                }
-                else {
-                    skip_p2 = true;
-                    g_update_request_latched = true;
-                }
+                _commit_round_schedule(g_round_schedule_class);
+                g_round_pre_commit_applied = true;
             }
             else {
                 skip_p2 = !_is_master();
-                g_update_request_latched = true;
+                _latch_update_request();
             }
         }
         else if (timecast_protocol_pre_p2_is_complete(&g_proto)) {
-            if (!(_build_schedule_from_pre_collect(g_round_schedule_class) &&
-                  _commit_schedule(g_round_schedule_class) &&
-                  _apply_round_schedule_to_proto(g_round_schedule_class))) {
-                g_update_request_latched = true;
-                if (!_seed_round_schedule_from_committed()) {
-                    skip_p2 = true;
-                }
-            }
+            _build_schedule_from_pre_collect(g_round_schedule_class);
+            _commit_round_schedule(g_round_schedule_class);
         }
         else {
-            if (!_seed_round_schedule_from_committed()) {
-                skip_p2 = true;
-                g_update_request_latched = true;
-            }
+            _seed_round_schedule_from_committed();
+            _latch_update_request();
         }
     }
     else {
         p2_start_ticks = next_phase_start_ticks;
-        if (!_seed_round_schedule_from_committed()) {
-            skip_p2 = true;
-            g_update_request_latched = true;
-        }
+        _seed_round_schedule_from_committed();
     }
 
     g_round_p2_start_ticks = p2_start_ticks;
     tta_driver_process();
     if (skip_p2) {
-        _wait_out_max_p2(p2_start_ticks);
+        _wait_out_p2_schedule(p2_start_ticks);
     }
     else {
         /* Enter adaptive P2 before subslot 0 so the first TX/RX is armed ahead of
@@ -1825,10 +1910,11 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
         }
     }
 
+    _master_track_p2_completeness();
     _log_round_summary_pre_p2();
 
     if (_is_master()) {
-        *next_master_round_start_ticks += _improved_round_period_ticks(g_round_pre_requested);
+        *next_master_round_start_ticks += _improved_round_period_ticks(g_round_run_pre);
     }
 }
 
@@ -1878,14 +1964,11 @@ int main(void)
     (void)timecast_store_mark_participant(&g_store, (uint8_t)TC_NODE_ID);
     timecast_protocol_init(&g_proto, _is_master());
     for (node_id = 0U; node_id < g_proto_cfg.p2_node_count; node_id++) {
-        g_committed_class[node_id] = TCAST_CLASS_MAX_ID;
-        g_round_schedule_class[node_id] = TCAST_CLASS_MAX_ID;
+        g_committed_class[node_id] = _initial_committed_class();
+        g_round_schedule_class[node_id] = g_committed_class[node_id];
     }
     _refresh_local_payload();
-    if (!_commit_schedule(g_committed_class)) {
-        puts("[timecast] initial schedule invalid");
-        return 1;
-    }
+    _commit_schedule(g_committed_class);
 
     g_round_count = 0U;
     g_p1_offset_sample_count = 0U;
