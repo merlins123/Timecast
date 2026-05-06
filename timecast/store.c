@@ -7,6 +7,30 @@ static bool _valid_node_id(uint8_t node_id)
     return (node_id < TIMECAST_STORE_MAX_NODES);
 }
 
+static bool _valid_store_payload(const timecast_store_t *store, uint8_t node_id,
+                                 const void *data, uint8_t len)
+{
+    return store && data && (len > 0U) &&
+           (len <= TIMECAST_STORE_MAX_DATA_LEN) &&
+           _valid_node_id(node_id);
+}
+
+static void _put_entry(timecast_store_t *store, timecast_store_entry_t *entry,
+                       const void *data, uint8_t len)
+{
+    if (!entry->participating) {
+        entry->participating = true;
+        store->participant_count++;
+    }
+    if (!entry->present) {
+        store->present_count++;
+    }
+
+    memcpy(entry->data, data, len);
+    entry->len = len;
+    entry->present = true;
+}
+
 void timecast_store_clear(timecast_store_t *store)
 {
     if (!store) {
@@ -48,26 +72,11 @@ bool timecast_store_mark_participant(timecast_store_t *store, uint8_t node_id)
 bool timecast_store_write(timecast_store_t *store, uint8_t node_id,
                           const void *data, uint8_t len)
 {
-    timecast_store_entry_t *entry;
-
-    if (!store || !data || (len == 0U) || (len > TIMECAST_STORE_MAX_DATA_LEN) ||
-        !_valid_node_id(node_id)) {
+    if (!_valid_store_payload(store, node_id, data, len)) {
         return false;
     }
 
-    entry = &store->entries[node_id];
-    if (!entry->participating) {
-        entry->participating = true;
-        store->participant_count++;
-    }
-    if (!entry->present) {
-        store->present_count++;
-    }
-
-    memcpy(entry->data, data, len);
-    entry->len = len;
-    entry->present = true;
-
+    _put_entry(store, &store->entries[node_id], data, len);
     return true;
 }
 
@@ -76,8 +85,7 @@ bool timecast_store_import(timecast_store_t *store, uint8_t node_id,
 {
     timecast_store_entry_t *entry;
 
-    if (!store || !data || (len == 0U) || (len > TIMECAST_STORE_MAX_DATA_LEN) ||
-        !_valid_node_id(node_id)) {
+    if (!_valid_store_payload(store, node_id, data, len)) {
         return false;
     }
 
@@ -86,18 +94,7 @@ bool timecast_store_import(timecast_store_t *store, uint8_t node_id,
         return false;
     }
 
-    if (!entry->participating) {
-        entry->participating = true;
-        store->participant_count++;
-    }
-    if (!entry->present) {
-        store->present_count++;
-    }
-
-    memcpy(entry->data, data, len);
-    entry->len = len;
-    entry->present = true;
-
+    _put_entry(store, entry, data, len);
     return true;
 }
 

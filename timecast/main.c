@@ -38,7 +38,7 @@
 #ifndef TCAST_APP_DATA_LEN
 #define TCAST_APP_DATA_LEN           (0U)
 #endif
-#define TCAST_LOCAL_PAYLOAD_META_LEN (8U)
+#define TCAST_LOCAL_PAYLOAD_META_LEN (6U)
 #if (TCAST_APP_DATA_LEN > (TIMECAST_STORE_MAX_DATA_LEN - TCAST_LOCAL_PAYLOAD_META_LEN))
 #error "TCAST_APP_DATA_LEN exceeds TIMECAST_STORE_MAX_DATA_LEN budget"
 #endif
@@ -476,19 +476,14 @@ static inline uint8_t _initial_committed_class(void)
     return _is_master() ? TCAST_CLASS_MAX_ID : _minimum_payload_class();
 }
 
-static inline uint8_t _local_source_id(void)
-{
-    return (uint8_t)TC_NODE_ID;
-}
-
 static inline bool _has_local_source(void)
 {
-    return (_local_source_id() < g_proto_cfg.p2_node_count);
+    return ((uint8_t)TC_NODE_ID < g_proto_cfg.p2_node_count);
 }
 
 static uint8_t _local_pending_update_count(void)
 {
-    uint8_t source_id = _local_source_id();
+    uint8_t source_id = (uint8_t)TC_NODE_ID;
 
     if (!_has_local_source()) {
         return 0U;
@@ -517,7 +512,7 @@ static void _format_class_map(char *dst, size_t dst_len,
         uint8_t class_id;
 
         if (desired_local_map) {
-            if (source_id != _local_source_id()) {
+            if (source_id != (uint8_t)TC_NODE_ID) {
                 dst[source_id] = '.';
                 continue;
             }
@@ -631,10 +626,10 @@ static uint8_t _build_local_payload_with_len(uint8_t source_id, uint8_t *dst, ui
     memset(dst, 0, payload_len);
     dst[0] = source_id;
     dst[1] = _is_master() ? 1U : 0U;
-    dst[4] = (uint8_t)(g_round_count & 0xFFU);
-    dst[5] = (uint8_t)((g_round_count >> 8) & 0xFFU);
-    dst[6] = (uint8_t)((g_round_count >> 16) & 0xFFU);
-    dst[7] = (uint8_t)((g_round_count >> 24) & 0xFFU);
+    dst[2] = (uint8_t)(g_round_count & 0xFFU);
+    dst[3] = (uint8_t)((g_round_count >> 8) & 0xFFU);
+    dst[4] = (uint8_t)((g_round_count >> 16) & 0xFFU);
+    dst[5] = (uint8_t)((g_round_count >> 24) & 0xFFU);
     if (payload_len > TCAST_LOCAL_PAYLOAD_META_LEN) {
         memset(&dst[TCAST_LOCAL_PAYLOAD_META_LEN], 'c',
                (size_t)(payload_len - TCAST_LOCAL_PAYLOAD_META_LEN));
@@ -751,16 +746,6 @@ static void _refresh_update_latch_from_committed_schedule(void)
     g_update_pending_latched = _local_update_pending();
 }
 
-static void _freeze_round_update_advertisement(void)
-{
-    g_round_tx_update_req = g_update_pending_latched && !g_round_run_pre;
-}
-
-static bool _local_packet_should_request_update(uint8_t owner_id)
-{
-    return (owner_id == _local_source_id()) && g_round_tx_update_req;
-}
-
 static void _master_request_pre_next_round(void)
 {
     if (_is_master()) {
@@ -768,13 +753,27 @@ static void _master_request_pre_next_round(void)
     }
 }
 
+static void _freeze_round_update_advertisement(void)
+{
+    g_round_tx_update_req = g_update_pending_latched && !g_round_run_pre;
+    if (g_round_tx_update_req) {
+        _master_request_pre_next_round();
+    }
+}
+
+static bool _local_packet_should_request_update(uint8_t owner_id)
+{
+    return (owner_id == (uint8_t)TC_NODE_ID) && g_round_tx_update_req;
+}
+
 static void _commit_schedule(const uint8_t *classes)
 {
     uint8_t source_id;
-    uint8_t local_source_id = _local_source_id();
+    uint8_t local_source_id = (uint8_t)TC_NODE_ID;
     uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
     uint8_t committed_p2_payload_len;
     uint8_t committed_data_len;
+    uint8_t desired_payload_len;
     uint8_t payload_len;
 
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
@@ -786,13 +785,15 @@ static void _commit_schedule(const uint8_t *classes)
         committed_p2_payload_len = _class_to_payload_len(classes[local_source_id]);
         committed_data_len = (uint8_t)(committed_p2_payload_len -
                                        TIMECAST_PACKET_P2_DATA_HDR_LEN);
-        payload_len = _local_payload_len_for_source(local_source_id);
-        if (payload_len > committed_data_len) {
-            payload_len = committed_data_len;
+        desired_payload_len = _local_payload_len_for_source(local_source_id);
+        if ((desired_payload_len <= committed_data_len) ||
+            (g_local_committed_payload_len == 0U)) {
+            payload_len = (desired_payload_len <= committed_data_len) ?
+                          desired_payload_len : TCAST_LOCAL_PAYLOAD_META_LEN;
+            payload_len = _build_local_payload_with_len(local_source_id, payload, payload_len);
+            memcpy(g_local_committed_payload, payload, payload_len);
+            g_local_committed_payload_len = payload_len;
         }
-        payload_len = _build_local_payload_with_len(local_source_id, payload, payload_len);
-        memcpy(g_local_committed_payload, payload, payload_len);
-        g_local_committed_payload_len = payload_len;
     }
 
     _refresh_update_latch_from_committed_schedule();
@@ -806,36 +807,45 @@ static void _commit_round_schedule(const uint8_t *classes)
 
 static void _refresh_local_payload(void)
 {
-    uint8_t source_id = _local_source_id();
-    uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
+    uint8_t source_id = (uint8_t)TC_NODE_ID;
     uint8_t payload_len;
     uint8_t payload_class;
-    uint8_t committed_payload_len;
 
     if (source_id >= g_proto_cfg.p2_node_count) {
         return;
     }
 
-    payload_len = _build_local_payload(source_id, payload);
+    payload_len = _local_payload_len_for_source(source_id);
     payload_class = _payload_data_len_to_class(payload_len);
     if (payload_class > TCAST_CLASS_MAX_ID) {
         _latch_update_request();
         return;
     }
     g_local_desired_class = payload_class;
-    if (payload_class != g_committed_class[source_id]) {
+    if (g_local_desired_class != g_committed_class[source_id]) {
         _latch_update_request();
     }
+}
 
-    committed_payload_len = _class_to_payload_len(g_committed_class[source_id]);
-    if (committed_payload_len == 0U) {
-        _latch_update_request();
+static void _load_local_desired_payload_for_p2(void)
+{
+    uint8_t source_id = (uint8_t)TC_NODE_ID;
+    uint8_t payload[TIMECAST_STORE_MAX_DATA_LEN];
+    uint8_t payload_len;
+
+    if (source_id >= g_proto_cfg.p2_node_count) {
         return;
     }
-    if ((uint8_t)(TIMECAST_PACKET_P2_DATA_HDR_LEN + payload_len) <= committed_payload_len) {
-        (void)timecast_store_write(&g_store, source_id, payload, payload_len);
-    }
-    else if (g_local_committed_payload_len > 0U) {
+
+    payload_len = _build_local_payload(source_id, payload);
+    (void)timecast_store_write(&g_store, source_id, payload, payload_len);
+}
+
+static void _load_local_committed_payload_for_p2(void)
+{
+    uint8_t source_id = (uint8_t)TC_NODE_ID;
+
+    if ((source_id < g_proto_cfg.p2_node_count) && (g_local_committed_payload_len > 0U)) {
         (void)timecast_store_write(&g_store, source_id,
                                    g_local_committed_payload,
                                    g_local_committed_payload_len);
@@ -1722,14 +1732,6 @@ static void _select_pre_p2_for_round(void)
     }
 }
 
-static void _master_queue_pre_if_update_is_pending(void)
-{
-    if (_use_pre_p2_mode() && _is_master() &&
-        g_update_pending_latched && !g_round_run_pre) {
-        _master_request_pre_next_round();
-    }
-}
-
 static bool _p2_chain_is_complete(void)
 {
     return timecast_store_present_count(&g_store) >= timecast_store_participant_count(&g_store);
@@ -1763,7 +1765,6 @@ static void _prepare_round(void)
     _reset_round_runtime_state();
     _select_pre_p2_for_round();
     _refresh_local_payload();
-    _master_queue_pre_if_update_is_pending();
 }
 
 static void _run_p1_phase(uint32_t next_master_round_start_ticks)
@@ -1794,6 +1795,7 @@ static void _run_round_original(uint32_t *next_master_round_start_ticks)
 
     p2_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
     g_round_p2_start_ticks = p2_start_ticks;
+    _load_local_desired_payload_for_p2();
     tta_driver_process();
 
     /* Enter fixed P2 before subslot 0 so the first TX/RX is armed ahead of
@@ -1810,33 +1812,39 @@ static void _run_round_original(uint32_t *next_master_round_start_ticks)
     }
 }
 
-static void _override_local_pre_p2_payload_len(void)
+static void _set_local_pre_p2_len_class(void)
 {
-    uint8_t local_source_id = _local_source_id();
+    uint8_t local_source_id = (uint8_t)TC_NODE_ID;
     uint8_t p2_payload_len;
 
-    if ((local_source_id >= g_proto_cfg.p2_node_count) ||
-        !g_proto.pre_p2.present[local_source_id]) {
+    if (local_source_id >= g_proto_cfg.p2_node_count) {
         return;
     }
 
     p2_payload_len = _class_to_payload_len(g_local_desired_class);
     if (p2_payload_len == 0U) {
-        g_proto.pre_p2.present[local_source_id] = 0U;
-        if (g_proto.pre_p2.known_count > 0U) {
+        if (g_proto.pre_p2.present[local_source_id] && (g_proto.pre_p2.known_count > 0U)) {
+            g_proto.pre_p2.present[local_source_id] = 0U;
             g_proto.pre_p2.known_count--;
         }
         g_proto.pre_p2.complete = false;
         return;
     }
 
+    if (!g_proto.pre_p2.present[local_source_id]) {
+        g_proto.pre_p2.present[local_source_id] = 1U;
+        g_proto.pre_p2.known_count++;
+        if (g_proto.pre_p2.known_count >= g_proto.pre_p2.node_count) {
+            g_proto.pre_p2.complete = true;
+        }
+    }
     g_proto.pre_p2.p2_payload_len[local_source_id] = p2_payload_len;
 }
 
 static uint32_t _run_pre_p2_collect(uint32_t start_ticks)
 {
     timecast_protocol_pre_p2_start(&g_proto, &g_store, start_ticks, &g_proto_cfg);
-    _override_local_pre_p2_payload_len();
+    _set_local_pre_p2_len_class();
 
     while (timecast_protocol_pre_p2_is_active(&g_proto)) {
         _run_pre_p2_subslot();
@@ -1847,7 +1855,8 @@ static uint32_t _run_pre_p2_collect(uint32_t start_ticks)
 
 static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
 {
-    uint32_t next_phase_start_ticks;
+    uint32_t next_p1_phase_start_ticks;
+    uint32_t next_collect_phase_start_ticks;
     uint32_t p2_start_ticks;
     bool skip_p2 = false;
 
@@ -1856,15 +1865,18 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
 
     _freeze_round_update_advertisement();
 
-    next_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
+    next_p1_phase_start_ticks = timecast_protocol_p1_get_next_phase_start_local_ticks(&g_proto);
+    next_collect_phase_start_ticks = next_p1_phase_start_ticks;
+    p2_start_ticks = next_p1_phase_start_ticks;
     if (g_round_run_pre) {
-        p2_start_ticks = _run_pre_p2_collect(next_phase_start_ticks);
+        next_collect_phase_start_ticks = _run_pre_p2_collect(next_p1_phase_start_ticks);
+        p2_start_ticks = next_collect_phase_start_ticks;
         if (_use_pre_commit_mode()) {
             g_round_pre_commit_enabled = true;
             if (_is_master()) {
                 _build_schedule_from_pre_collect(g_round_schedule_class);
             }
-            _pre_commit_start(p2_start_ticks,
+            _pre_commit_start(next_collect_phase_start_ticks,
                               _is_master() ? g_round_schedule_class : NULL);
             while (g_pre_commit.active) {
                 _run_pre_commit_slot();
@@ -1892,11 +1904,13 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
         }
     }
     else {
-        p2_start_ticks = next_phase_start_ticks;
         _seed_round_schedule_from_committed();
     }
 
     g_round_p2_start_ticks = p2_start_ticks;
+    if (!skip_p2) {
+        _load_local_committed_payload_for_p2();
+    }
     tta_driver_process();
     if (skip_p2) {
         _wait_out_p2_schedule(p2_start_ticks);
