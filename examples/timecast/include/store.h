@@ -31,19 +31,16 @@ typedef struct {
     timecast_store_entry_t entries[TIMECAST_STORE_MAX_NODES];
 } timecast_store_t;
 
-void timecast_store_init(timecast_store_t *store, uint8_t local_node_id);
-void timecast_store_clear(timecast_store_t *store);
-bool timecast_store_mark_participant(timecast_store_t *store, uint8_t node_id);
-bool timecast_store_write(timecast_store_t *store, uint8_t node_id,
+void store_init(timecast_store_t *store, uint8_t local_node_id);
+void store_clear(timecast_store_t *store);
+bool store_mark_participant(timecast_store_t *store, uint8_t node_id);
+void store_write(timecast_store_t *store, uint8_t node_id,
                           const void *data, uint8_t len);
-bool timecast_store_write_local(timecast_store_t *store, const void *data, uint8_t len);
-bool timecast_store_import(timecast_store_t *store, uint8_t node_id,
+bool store_import(timecast_store_t *store, uint8_t node_id,
                            const void *data, uint8_t len);
-const timecast_store_entry_t *timecast_store_get(const timecast_store_t *store, uint8_t node_id);
-bool timecast_store_has_data(const timecast_store_t *store, uint8_t node_id);
-uint16_t timecast_store_present_count(const timecast_store_t *store);
-uint16_t timecast_store_participant_count(const timecast_store_t *store);
-bool timecast_store_is_complete(const timecast_store_t *store);
+bool store_has_data(const timecast_store_t *store, uint8_t node_id);
+uint16_t store_present_count(const timecast_store_t *store);
+uint16_t store_participant_count(const timecast_store_t *store);
 
 #ifdef __cplusplus
 }
