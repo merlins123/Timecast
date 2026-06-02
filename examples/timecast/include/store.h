@@ -18,32 +18,27 @@ extern "C" {
 #endif
 
 typedef struct {
-    bool participating;
-    bool present;
+    bool present;          
     uint8_t len;
     uint8_t data[TIMECAST_STORE_MAX_DATA_LEN];
 } timecast_store_entry_t;
 
 typedef struct {
     uint8_t local_node_id;
-    uint16_t participant_count;
     uint16_t present_count;
     timecast_store_entry_t entries[TIMECAST_STORE_MAX_NODES];
 } timecast_store_t;
 
 void store_init(timecast_store_t *store, uint8_t local_node_id);
-void store_clear(timecast_store_t *store);
-bool store_mark_participant(timecast_store_t *store, uint8_t node_id);
-void store_write(timecast_store_t *store, uint8_t node_id,
-                          const void *data, uint8_t len);
+void store_mark_participant(timecast_store_t *store, uint8_t node_id);
 bool store_import(timecast_store_t *store, uint8_t node_id,
                            const void *data, uint8_t len);
 bool store_has_data(const timecast_store_t *store, uint8_t node_id);
 uint16_t store_present_count(const timecast_store_t *store);
-uint16_t store_participant_count(const timecast_store_t *store);
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* TIMECAST_STORE_H */
+#endif 

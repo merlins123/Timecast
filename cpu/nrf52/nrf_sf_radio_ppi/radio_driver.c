@@ -217,7 +217,7 @@ static void _init_radio(void)
 
     NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_Pos;
     NRF_RADIO->FREQUENCY = ble_hw_frequency_channels[37];      /* BLE Advertising channel*/
-    NRF_RADIO->DATAWHITEIV = 5;   /* Whitening IV must match BLE channel index */
+    NRF_RADIO->DATAWHITEIV = 37;   /* Whitening IV must match BLE channel index */
 
     /* Configure Packet Address */
     NRF_RADIO->PREFIX0 = AA_PREFIX;
