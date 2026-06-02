@@ -28,15 +28,6 @@ static bool _tx_first(const timecast_protocol_state_t *state)
     return state && ((state->p1.local_hop & 0x1U) == 0U);
 }
 
-
-static uint32_t _p2_subslot_ticks_from_payload_len(const timecast_protocol_cfg_t *cfg,
-                                                          uint8_t p2_payload_len)
-{
-    
-    return cfg->p2_payload_base_ticks +
-           ((uint32_t)p2_payload_len * cfg->p2_payload_byte_ticks);
-}
-
 static void _set_next_phase_start(timecast_protocol_state_t *state,
                                          const timecast_protocol_cfg_t *cfg,
                                          uint32_t tref_local_ticks)
@@ -111,10 +102,9 @@ static bool _p2_build_adaptive_schedule(timecast_protocol_state_t *state,
         if (!state->pre_p2.present[source_id]) {
             return false;
         }
-        subslot_ticks = _p2_subslot_ticks_from_payload_len(cfg, p2_payload_len);
-        if (subslot_ticks == 0U) {
-            return false;
-        }
+
+        subslot_ticks = cfg->p2_payload_base_ticks +
+                        ((uint32_t)p2_payload_len * cfg->p2_payload_byte_ticks);
 
         state->p2.subslot_offset_ticks[source_id] = slot_ticks;
         state->p2.subslot_ticks[source_id] = subslot_ticks;
@@ -266,7 +256,6 @@ void pre_p2_start(timecast_protocol_state_t *state,
     _set_pre_p2_commit_start(state, cfg);
     state->pre_p2.active = state->joined;
     
-
     state->pre_p2.present[source_id] = 1U;
     state->pre_p2.p2_payload_len[source_id] = desired_len;
 }
@@ -341,28 +330,6 @@ uint32_t pre_commit_slot_ticks(const timecast_protocol_cfg_t *cfg)
            ((uint32_t)payload_len * cfg->p2_payload_byte_ticks);
 }
 
-static void _pack_class_schedule(const uint8_t *classes, uint8_t node_count,
-                                 uint8_t *packed_out, uint8_t *packed_len_out)
-{
-    uint8_t source_id;
-    uint8_t packed_len = _packed_class_len(node_count);
-
-    memset(packed_out, 0, packed_len);
-    for (source_id = 0U; source_id < node_count; source_id++) {
-        uint8_t class_id = classes[source_id];
-        uint8_t byte_idx = (uint8_t)(source_id / 2U);
-
-        if ((source_id & 0x1U) == 0U) {
-            packed_out[byte_idx] |= class_id;
-        }
-        else {
-            packed_out[byte_idx] |= (uint8_t)(class_id << 4);
-        }
-    }
-
-    *packed_len_out = packed_len;
-}
-
 void pre_commit_start(timecast_protocol_state_t *state,
                                     uint32_t start_local_ticks,
                                     const timecast_protocol_cfg_t *cfg, const uint8_t *classes, bool master)
@@ -376,20 +343,31 @@ void pre_commit_start(timecast_protocol_state_t *state,
         return;
     }
 
-    _pack_class_schedule(classes, cfg->p2_node_count,
-                         state->pre_commit.packed_schedule, &state->pre_commit.packed_len);
+    uint8_t source_id;
+    uint8_t node_count = cfg->p2_node_count;
+
+    for (source_id = 0U; source_id < node_count; source_id++) {
+        uint8_t class_id = classes[source_id];
+        uint8_t byte_idx = (uint8_t)(source_id / 2U);
+
+        if ((source_id & 0x1U) == 0U) {
+            state->pre_commit.packed_schedule[byte_idx] |= class_id;
+        }
+        else {
+            state->pre_commit.packed_schedule[byte_idx] |= (uint8_t)(class_id << 4);
+        }
+    }
+
+    state->pre_commit.packed_len = _packed_class_len(node_count);
     state->pre_commit.have_schedule = true;
     state->pre_commit.flag_tx = true;
+    
 }
 
 static bool _p2_start_common(timecast_protocol_state_t *state,
                              uint32_t start_local_ticks,
                              const timecast_protocol_cfg_t *cfg)
 {
-    if (!state || !cfg) {
-        return false;
-    }
-
     memset(&state->p2, 0, sizeof(state->p2));
     state->phase = TIMECAST_PHASE_P2_DATA;
     state->p2.tx_slot = _tx_first(state);

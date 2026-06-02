@@ -161,7 +161,7 @@ static bool g_round_run_pre;
 static bool g_master_run_pre_next_round;
 static bool g_master_force_initial_pre = true;
 static uint32_t g_master_p2_incomplete_rounds;
-
+static bool g_syn_least_once = false;
 
 static bool _is_master(void);
 
@@ -327,7 +327,7 @@ static void _format_class_map(char *dst, size_t dst_len,
     dst[g_proto_cfg.p2_node_count] = '\0';
 }
 
-static uint8_t _local_payload_len_for_source(uint8_t source_id)
+static uint8_t _local_data_len_for_source(uint8_t source_id)
 {
     (void)source_id;
 #if (TEST_NODE2_CLASS_PERIOD > 0U)
@@ -397,10 +397,10 @@ static void _unpack_class_schedule(const uint8_t *packed, uint8_t node_count, ui
 static void _build_schedule_from_pre_collect(uint8_t *classes_out)
 {
     uint8_t source_id;
-
+    uint8_t class_id;
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         if (g_proto.pre_p2.present[source_id]) {
-            uint8_t class_id = _payload_len_to_class(g_proto.pre_p2.p2_payload_len[source_id]);
+            class_id = _payload_len_to_class(g_proto.pre_p2.p2_payload_len[source_id]);
 
             classes_out[source_id] = class_id;
         }
@@ -414,7 +414,6 @@ static void _apply_round_schedule_to_proto(void)
 {
     uint8_t source_id;
 
-    g_proto.pre_p2.complete = true;
     for (source_id = 0U; source_id < g_proto_cfg.p2_node_count; source_id++) {
         g_proto.pre_p2.present[source_id] = 1U;
         g_proto.pre_p2.p2_payload_len[source_id] = _class_to_payload_len(g_scheduled_class[source_id]);
@@ -454,7 +453,7 @@ static void _commit_round_schedule(const uint8_t *classes)
     scheduled_p2_payload_len = _class_to_payload_len(classes[local_source_id]);
     scheduled_data_len = (uint8_t)(scheduled_p2_payload_len -
                                     PACKET_P2_DATA_HDR_LEN);
-    desired_payload_len = _local_payload_len_for_source(local_source_id);
+    desired_payload_len = _local_data_len_for_source(local_source_id);
     if ((desired_payload_len <= scheduled_data_len) ||
         (g_local_scheduled_payload_len == 0U)) {
         payload_len = (desired_payload_len <= scheduled_data_len) ?
@@ -484,7 +483,7 @@ static void _local_payload_init(void)
         g_scheduled_class[node_id] = _is_master() ? CLASS_MAX_ID : _payload_len_to_class((uint8_t)(PACKET_P2_DATA_HDR_LEN + LOCAL_PAYLOAD_META_LEN));
     }
 
-    payload_len = _local_payload_len_for_source(source_id);
+    payload_len = _local_data_len_for_source(source_id);
     payload_class = _payload_len_to_class((uint8_t)(PACKET_P2_DATA_HDR_LEN + payload_len));
 
     payload_len = _build_local_payload_with_len(source_id, payload, LOCAL_PAYLOAD_META_LEN);
@@ -504,7 +503,7 @@ static void _load_local_desired_payload_for_p2(void)
     uint8_t payload_len;
 
     payload_len = _build_local_payload_with_len(source_id, payload,
-                                                _local_payload_len_for_source(source_id));
+                                                _local_data_len_for_source(source_id));
     (void)store_import(&g_store, source_id, payload, payload_len);
 }
 
@@ -582,9 +581,6 @@ static void _run_pre_commit_slot(void)
     bool do_tx = g_proto.pre_commit.have_schedule && g_proto.pre_commit.flag_tx &&
                  (g_proto.pre_commit.ntx_done < NTX);
 
-    if ((int32_t)(rx_window_end_ticks - slot_active_end_ticks) > 0) {
-        rx_window_end_ticks = slot_active_end_ticks;
-    }
 
     if ((int32_t)(now_tick - slot_start_ticks) >= 0) {
         _pre_commit_finish_slot(do_tx);
@@ -594,8 +590,6 @@ static void _run_pre_commit_slot(void)
     if (do_tx) {
         uint8_t payload[PACKET_PRE_COMMIT_MAX_PAYLOAD_LEN] = {0};
 
-        
-       
         encode_pre_commit(payload, g_proto.pre_commit.packed_schedule, g_proto.pre_commit.packed_len);
 
         radio_tx_arm(payload, slot_start_ticks);
@@ -673,7 +667,7 @@ static void _log_round_summary_pre_p2(void)
 
     printf("[timecast] round{id=%u,role=%s,round=%" PRIu32
            ",epoch=%" PRIu32 ",joined=%u,hop=%u,syncslot=%u"
-           ",rx=%" PRIu32
+           ",p1rx=%" PRIu32
            ",pre=%u,upd=%u"
            ",pp2rx=%" PRIu32
            ",p2rx=%" PRIu32 ",p2store=%" PRIu32
@@ -849,10 +843,6 @@ static void _run_pre_p2_subslot(void)
     uint32_t now_tick = now_ticks();
     uint8_t owner_id = g_proto.pre_p2.subslot_idx;
 
-    if ((int32_t)(rx_window_end_ticks - subslot_active_end_ticks) > 0) {
-        rx_window_end_ticks = subslot_active_end_ticks;
-    }
-
     if ((int32_t)(now_tick - subslot_start_ticks) >= 0) {
         printf("[timecast] pre-p2 miss: slot=%u sub=%u now=%" PRIu32 " deadline=%" PRIu32 "\n",
                (unsigned)g_proto.p2.slot_idx,
@@ -1025,10 +1015,17 @@ static void _master_track_p2_completeness(void)
     }
 }
 
+static void _wait_until_round_end(void){
+    uint32_t p2_ticks;
+
+    p2_ticks = 2*NTX*g_proto.p2.slot_ticks;
+    WAIT_UNTIL_ABS(0, g_round_p2_start_ticks + p2_ticks);
+}
+
 static void _prepare_round(void)
 {
     uint8_t source_id = (uint8_t)LOCAL_NODE_ID;
-    uint8_t payload_len;
+    uint8_t data_len;
     uint8_t payload_class;
 
     g_round_count++;
@@ -1038,8 +1035,8 @@ static void _prepare_round(void)
     g_store.present_count = 0;
     
 
-    payload_len = _local_payload_len_for_source(source_id);
-    payload_class = _payload_len_to_class((uint8_t)(PACKET_P2_DATA_HDR_LEN + payload_len));
+    data_len = _local_data_len_for_source(source_id);
+    payload_class = _payload_len_to_class((uint8_t)(PACKET_P2_DATA_HDR_LEN + data_len));
 
     g_local_desired_class = payload_class;
     if (g_local_desired_class != g_scheduled_class[source_id]) {
@@ -1160,9 +1157,13 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
                                    round_schedule_class);
             _commit_round_schedule(round_schedule_class);
             _apply_round_schedule_to_proto();
+            g_proto.pre_p2.complete = true;
+            g_syn_least_once = true;
         }
     }
     else {
+        if(g_syn_least_once)
+        g_proto.pre_p2.complete = true;
         _apply_round_schedule_to_proto();
     }
 
@@ -1170,6 +1171,9 @@ static void _run_round_pre_p2(uint32_t *next_master_round_start_ticks)
     _load_local_scheduled_payload_for_p2();
 
     p2_start_pre_p2(&g_proto, p2_start_ticks, &g_proto_cfg);
+    if(!g_proto.p2.active){
+        _wait_until_round_end();
+    }
     while (g_proto.p2.active) {
         _run_p2_subslot();
     }
