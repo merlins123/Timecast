@@ -4,21 +4,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
+#include "nrf_sf_radio/link_radio.h"
 #include "store.h"
+
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define Adv_Ad_Lo      (0xABABABUL)
-#define Adv_Ad_Hi      (0xABABC0UL)
-
-#define PACKET_S0_LEN       (1U)
-#define PACKET_LENGTH_LEN   (1U)
-#define PACKET_ADV_ADDR_LEN (6U)
-#define PACKET_RADIO_HDR_LEN \
-    (PACKET_S0_LEN + PACKET_LENGTH_LEN + PACKET_ADV_ADDR_LEN)
 
 #define PACKET_TYPE_P1_SYNC (0x01U)
 #define PACKET_TYPE_P2_DATA (0x02U)
@@ -35,7 +30,6 @@ extern "C" {
 
 typedef struct __attribute__((packed)) {
     uint8_t packet_type;
-    uint8_t sender_node_id;
     uint8_t relay_cnt;
     uint8_t flags;
     uint32_t epoch;
@@ -52,24 +46,19 @@ typedef struct __attribute__((packed)) {
     uint32_t epoch;
 } p2_data_frame_t;
 
-
 enum {
     PACKET_P1_SYNC_APP_LEN = sizeof(p1_sync_frame_t)-1, 
-    PACKET_P1_SYNC_PAYLOAD_LEN = PACKET_RADIO_HDR_LEN + PACKET_P1_SYNC_APP_LEN,
-    PACKET_P1_SYNC_RX_LEN = PACKET_P1_SYNC_PAYLOAD_LEN,
+    PACKET_P1_SYNC_PAYLOAD_LEN = NRF_SF_RADIO_HDR_LEN + PACKET_P1_SYNC_APP_LEN,
     PACKET_P2_DATA_APP_HDR_LEN = sizeof(p2_data_frame_t)-1, 
-    PACKET_P2_DATA_HDR_LEN = PACKET_RADIO_HDR_LEN + PACKET_P2_DATA_APP_HDR_LEN,
+    PACKET_P2_DATA_HDR_LEN = NRF_SF_RADIO_HDR_LEN + PACKET_P2_DATA_APP_HDR_LEN,
     PACKET_P2_DATA_MAX_DATA_LEN = TIMECAST_STORE_MAX_DATA_LEN,
     PACKET_P2_DATA_MAX_PAYLOAD_LEN =
         PACKET_P2_DATA_HDR_LEN + PACKET_P2_DATA_MAX_DATA_LEN,
-    PACKET_P2_DATA_RX_MIN_LEN = PACKET_P2_DATA_HDR_LEN,
     PACKET_PRE_P2_CTRL_APP_LEN = 1U,
-    PACKET_PRE_P2_CTRL_LEN = PACKET_RADIO_HDR_LEN + PACKET_PRE_P2_CTRL_APP_LEN,
-    PACKET_PRE_COMMIT_BASE_LEN = PACKET_RADIO_HDR_LEN,
+    PACKET_PRE_P2_CTRL_LEN = NRF_SF_RADIO_HDR_LEN + PACKET_PRE_P2_CTRL_APP_LEN,
     PACKET_PRE_COMMIT_MAX_SCHEDULE_LEN = (TIMECAST_STORE_MAX_NODES + 1U) / 2U,
     PACKET_PRE_COMMIT_MAX_PAYLOAD_LEN =
-        PACKET_PRE_COMMIT_BASE_LEN + PACKET_PRE_COMMIT_MAX_SCHEDULE_LEN,
-    PACKET_PRE_COMMIT_RX_MIN_LEN = PACKET_PRE_COMMIT_BASE_LEN,
+        NRF_SF_RADIO_HDR_LEN + PACKET_PRE_COMMIT_MAX_SCHEDULE_LEN,
 };
 
 void encode_p1_sync(uint8_t *dst, size_t dst_len,
@@ -92,7 +81,6 @@ void decode_pre_commit(const uint8_t *radio_payload,
                                        uint8_t node_count,
                                        uint8_t *packed_schedule_out,
                                        size_t *packed_len_out);
-
 #ifdef __cplusplus
 }
 #endif

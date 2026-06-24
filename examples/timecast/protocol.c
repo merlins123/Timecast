@@ -170,12 +170,10 @@ uint32_t p1_get_slot_start_local_ticks(const timecast_protocol_state_t *state,
 }
 
 void p1_prepare_tx(timecast_protocol_state_t *state,
-                                     const timecast_protocol_cfg_t *cfg,
                                      p1_sync_frame_t *frame)
 {
     
     frame->packet_type = PACKET_TYPE_P1_SYNC;
-    frame->sender_node_id = cfg->local_node_id;
     frame->relay_cnt = (uint8_t)state->p1.slot_idx;
     frame->flags = 0U;
     frame->epoch = state->current_epoch;
@@ -323,7 +321,7 @@ static uint8_t _packed_class_len(uint8_t node_count)
 
 uint32_t pre_commit_slot_ticks(const timecast_protocol_cfg_t *cfg)
 {
-    uint8_t payload_len = (uint8_t)(PACKET_PRE_COMMIT_BASE_LEN +
+    uint8_t payload_len = (uint8_t)(NRF_SF_RADIO_HDR_LEN +
                                     _packed_class_len(cfg->p2_node_count));
 
     return cfg->p2_payload_base_ticks +

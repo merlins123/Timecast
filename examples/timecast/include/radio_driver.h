@@ -17,7 +17,7 @@ void timer2_reset_tx(void);
 void timer2_reset_rx(void);
 void radio_tx_arm(uint8_t *buf, uint32_t deadline_ticks);
 void radio_rx_arm(uint8_t *buf, uint32_t deadline_ticks);
-void _try_rx_enable(uint8_t *buf);
+void try_rx_enable(uint8_t *buf);
 
 #define WAIT_UNTIL_ABS(cond, deadline) \
     do{ \

@@ -5,31 +5,12 @@
 #include <string.h>
 
 #include "packet.h"
+#include "nrf_sf_radio/link_radio.h"
 #include "protocol.h"
 #include "store.h"
-#include "radio_driver.h"
+#include "nrf_sf_radio/radio_driver.h"
 
 
-#define SLOT_PROCESSING_US      (88U)
-#define PRE_P2_SLOT_PROCESSING_US (40U)
-#define FAST_RAMPUP             (1U)
-
-#if FAST_RAMPUP
-#define RADIO_RAMPUP_US         (40U)
-#else
-#define RADIO_RAMPUP_US         (140U)
-#endif
-
-#define TX_CHAIN_DELAY           (10U)  
-
-#define SLOT_PHY_OVERHEAD_BYTES (8U)
-#ifndef USE_PRE_P2
-#define USE_PRE_P2             (0U)
-#endif
-#ifndef APP_DATA_LEN
-#define APP_DATA_LEN           (0U)
-#endif
-#define LOCAL_PAYLOAD_META_LEN (6U)
 #if (APP_DATA_LEN > (TIMECAST_STORE_MAX_DATA_LEN - LOCAL_PAYLOAD_META_LEN))
 #error "APP_DATA_LEN exceeds TIMECAST_STORE_MAX_DATA_LEN budget"
 #endif
@@ -40,103 +21,27 @@
 #define P2_PAYLOAD_TO_SUBSLOT_US(payload_len) \
     (SLOT_PROCESSING_US + RADIO_RAMPUP_US + \
      PACKET_AIR_TIME_US(payload_len))
-#ifndef P1_SLOT_US
-#define P1_SLOT_US              \
-    (SLOT_PROCESSING_US + RADIO_RAMPUP_US + \
-     PACKET_AIR_TIME_US(PACKET_P1_SYNC_PAYLOAD_LEN))
-#endif
-#ifndef P2_SUBSLOT_US
-#define P2_SUBSLOT_US           \
-    P2_PAYLOAD_TO_SUBSLOT_US(LOCAL_P2_PAYLOAD_LEN)
-#endif
-#ifndef PRE_P2_SUBSLOT_US
-#define PRE_P2_SUBSLOT_US       \
-    (PRE_P2_SLOT_PROCESSING_US + RADIO_RAMPUP_US + \
-     PACKET_AIR_TIME_US(PACKET_PRE_P2_CTRL_LEN))
-#endif
-
-#ifndef LOCAL_NODE_ID
-#define LOCAL_NODE_ID (NODE_ID)
-#endif
-
-
-
-#ifndef MASTER_START_DELAY_US
-#define MASTER_START_DELAY_US   (2U * P1_SLOT_US)
-#endif
-#ifndef ROUND_GAP_US
-#define ROUND_GAP_US            (200U * P1_SLOT_US)
-#endif
-#ifndef NTX
-#define NTX                     (16U)
-#endif
 #if (NTX > 63U)
 #error "NTX exceeds 7-bit packed relay_cnt budget"
-#endif
-#ifndef P2_NODE_COUNT
-#define P2_NODE_COUNT           (4U)
-#endif
-#ifndef P2_START_GUARD_US
-#define P2_START_GUARD_US       (P1_SLOT_US)
-#endif
-#ifndef PRE_P2_SUBSLOT_GUARD_US
-#define PRE_P2_SUBSLOT_GUARD_US (40U)
-#endif
-#ifndef P2_SUBSLOT_GUARD_US
-#define P2_SUBSLOT_GUARD_US     (88U)
-#endif
-#ifndef P2_RX_WINDOW_US
-#define P2_RX_WINDOW_US         (RADIO_RAMPUP_US + 50U)
-#endif
-#ifndef P2_RX_WINDOW_MARGIN_US
-#define P2_RX_WINDOW_MARGIN_US  (24U)
-#endif
-#ifndef P1_RX_TS_TO_SLOT_START_US
-#define P1_RX_TS_TO_SLOT_START_US (40U)
-
-#endif
-#ifndef P1_RX_LEAD_US
-#define P1_RX_LEAD_US           (80U)
-#endif
-#ifndef P2_RX_LEAD_US
-#define P2_RX_LEAD_US           (40U)
-#endif
-#ifndef TX_MIN_ARM_LEAD_US
-#define TX_MIN_ARM_LEAD_US      (8U)
-#endif
-#ifndef P1_SCAN_LOG_INTERVAL_US
-#define P1_SCAN_LOG_INTERVAL_US (1000000U)
-#endif
-#ifndef MASTER_P2_INCOMPLETE_PRE_THRESHOLD
-#define MASTER_P2_INCOMPLETE_PRE_THRESHOLD (3U)
 #endif
 
 static uint8_t rx_buffer[255] = {0};
 
-#define P1_SLOT_TICKS         US_TO_TIMER_TICKS(P1_SLOT_US)
-#define PRE_P2_SUBSLOT_TICKS  US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_US)
-#define P2_SUBSLOT_TICKS      US_TO_TIMER_TICKS(P2_SUBSLOT_US)
+#define P1_SLOT_TICKS         NRF_SF_RADIO_US_TO_TIMER_TICKS(P1_SLOT_US)
+#define PRE_P2_SUBSLOT_TICKS  NRF_SF_RADIO_US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_US)
+#define P2_SUBSLOT_TICKS      NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_SUBSLOT_US)
 #define P1_SLOT_ACTIVE_US     (P1_SLOT_US - SLOT_PROCESSING_US)
 #define PRE_P2_SUBSLOT_PERIOD_US (PRE_P2_SUBSLOT_US + PRE_P2_SUBSLOT_GUARD_US)
 #define P2_SUBSLOT_PERIOD_US  (P2_SUBSLOT_US + P2_SUBSLOT_GUARD_US)
 #define P1_SYNC_DURATION_TICKS ((uint32_t)(2U * NTX) * P1_SLOT_TICKS)
-#define P1_SLOT_ACTIVE_TICKS  US_TO_TIMER_TICKS(P1_SLOT_ACTIVE_US)
-#define PRE_P2_SLOT_PROCESSING_TICKS US_TO_TIMER_TICKS(PRE_P2_SLOT_PROCESSING_US)
-#define SLOT_PROCESSING_TICKS US_TO_TIMER_TICKS(SLOT_PROCESSING_US)
-#define PRE_P2_SUBSLOT_PERIOD_TICKS US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_PERIOD_US)
-#define P2_SUBSLOT_PERIOD_TICKS US_TO_TIMER_TICKS(P2_SUBSLOT_PERIOD_US)
+#define P1_SLOT_ACTIVE_TICKS  NRF_SF_RADIO_US_TO_TIMER_TICKS(P1_SLOT_ACTIVE_US)
+#define PRE_P2_SLOT_PROCESSING_TICKS NRF_SF_RADIO_US_TO_TIMER_TICKS(PRE_P2_SLOT_PROCESSING_US)
+#define SLOT_PROCESSING_TICKS NRF_SF_RADIO_US_TO_TIMER_TICKS(SLOT_PROCESSING_US)
+#define PRE_P2_SUBSLOT_PERIOD_TICKS NRF_SF_RADIO_US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_PERIOD_US)
+#define P2_SUBSLOT_PERIOD_TICKS NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_SUBSLOT_PERIOD_US)
 #define CLASS_COUNT      (16U)
 #define CLASS_MAX_ID     (CLASS_COUNT - 1U)
 #define CLASS_INVALID_ID (CLASS_COUNT)
-#ifndef TEST_NODE2_CLASS_PERIOD
-#define TEST_NODE2_CLASS_PERIOD (0U)
-#endif
-#ifndef TEST_NODE2_CLASS_MIN
-#define TEST_NODE2_CLASS_MIN    (1U)
-#endif
-#ifndef TEST_NODE2_CLASS_MAX
-#define TEST_NODE2_CLASS_MAX    (CLASS_MAX_ID)
-#endif
 #if (TEST_NODE2_CLASS_MIN == 0U)
 #error "TEST_NODE2_CLASS_MIN must fit the local payload metadata"
 #endif
@@ -170,18 +75,18 @@ static timecast_protocol_cfg_t g_proto_cfg = {
     .ntx = NTX,
     .p2_node_count = P2_NODE_COUNT,
     .glossy_slot_ticks = P1_SLOT_TICKS,
-    .p1_rx_ts_to_slot_start_ticks = US_TO_TIMER_TICKS(P1_RX_TS_TO_SLOT_START_US),
-    .p1_guard_ticks = US_TO_TIMER_TICKS(P2_START_GUARD_US),
+    .p1_rx_ts_to_slot_start_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(P1_RX_TS_TO_SLOT_START_US),
+    .p1_guard_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_START_GUARD_US),
     .pre_p2_subslot_ticks = PRE_P2_SUBSLOT_TICKS,
-    .pre_p2_guard_ticks = US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_GUARD_US),
-    .pre_p2_rx_window_ticks = US_TO_TIMER_TICKS(P2_RX_WINDOW_US),
+    .pre_p2_guard_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(PRE_P2_SUBSLOT_GUARD_US),
+    .pre_p2_rx_window_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_RX_WINDOW_US),
     .p2_subslot_ticks = P2_SUBSLOT_TICKS,
-    .p2_guard_ticks = US_TO_TIMER_TICKS(P2_SUBSLOT_GUARD_US),
-    .p2_rx_window_ticks = US_TO_TIMER_TICKS(P2_RX_WINDOW_US),
+    .p2_guard_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_SUBSLOT_GUARD_US),
+    .p2_rx_window_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_RX_WINDOW_US),
     .p2_payload_base_ticks =
-        US_TO_TIMER_TICKS(SLOT_PROCESSING_US + RADIO_RAMPUP_US +
+        NRF_SF_RADIO_US_TO_TIMER_TICKS(SLOT_PROCESSING_US + RADIO_RAMPUP_US +
                                 (8U * SLOT_PHY_OVERHEAD_BYTES)),
-    .p2_payload_byte_ticks = US_TO_TIMER_TICKS(8U),
+    .p2_payload_byte_ticks = NRF_SF_RADIO_US_TO_TIMER_TICKS(8U),
 };
 
 
@@ -198,8 +103,7 @@ static uint32_t _pre_p2_duration_ticks(uint8_t node_count)
 
 static uint8_t _class_span_bytes(void)
 {
-    return (uint8_t)(((PACKET_P2_DATA_MAX_PAYLOAD_LEN -
-                       PACKET_P2_DATA_HDR_LEN + 1U) +
+    return (uint8_t)(((PACKET_P2_DATA_MAX_DATA_LEN + 1U) +
                       CLASS_COUNT - 1U) / CLASS_COUNT);
 }
 
@@ -244,7 +148,7 @@ static uint32_t _original_round_period_ticks(void)
 
     period_ticks += _original_p2_duration_ticks();
 
-    return period_ticks + US_TO_TIMER_TICKS(ROUND_GAP_US);
+    return period_ticks + NRF_SF_RADIO_US_TO_TIMER_TICKS(ROUND_GAP_US);
 }
 
 static uint32_t _improved_round_period_ticks(bool run_pre)
@@ -259,7 +163,7 @@ static uint32_t _improved_round_period_ticks(bool run_pre)
     }
 
     period_ticks += (uint32_t)(2U * NTX) * p2_get_slot_ticks(&g_proto, &g_proto_cfg);
-    return period_ticks + US_TO_TIMER_TICKS(ROUND_GAP_US);
+    return period_ticks + NRF_SF_RADIO_US_TO_TIMER_TICKS(ROUND_GAP_US);
 }
 
 static bool _is_master(void)
@@ -577,7 +481,7 @@ static void _run_pre_commit_slot(void)
     uint32_t slot_end_ticks = slot_start_ticks + g_proto.pre_commit.slot_ticks;
     uint32_t slot_active_end_ticks = slot_end_ticks - SLOT_PROCESSING_TICKS;
     uint32_t rx_window_end_ticks = slot_start_ticks + g_proto_cfg.p2_rx_window_ticks;
-    uint32_t now_tick = now_ticks();
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
     bool do_tx = g_proto.pre_commit.have_schedule && g_proto.pre_commit.flag_tx &&
                  (g_proto.pre_commit.ntx_done < NTX);
 
@@ -590,39 +494,40 @@ static void _run_pre_commit_slot(void)
     if (do_tx) {
         uint8_t payload[PACKET_PRE_COMMIT_MAX_PAYLOAD_LEN] = {0};
 
-        encode_pre_commit(payload, g_proto.pre_commit.packed_schedule, g_proto.pre_commit.packed_len);
+        encode_pre_commit(payload, g_proto.pre_commit.packed_schedule,
+                          g_proto.pre_commit.packed_len);
 
-        radio_tx_arm(payload, slot_start_ticks);
+        if (!nrf_sf_radio_tx_start(payload, slot_start_ticks,
+                                   slot_active_end_ticks,
+                                   g_proto.pre_commit.packed_len)) {
+            printf("[timecast-at] pre-commit tx error\n");
+        }
 
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END != 0U, slot_end_ticks);
-        
         g_proto.pre_commit.ntx_done++;
         _pre_commit_finish_slot(true);
         return;
     }
 
-    radio_rx_arm(rx_buffer, slot_start_ticks - US_TO_TIMER_TICKS(P2_RX_LEAD_US));
-    WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS != 0U, rx_window_end_ticks);
-    if (NRF_RADIO->EVENTS_ADDRESS != 0U) {
-
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END != 0U, slot_active_end_ticks + US_TO_TIMER_TICKS(TX_CHAIN_DELAY));
-        if ((NRF_RADIO->EVENTS_END != 0U) && (NRF_RADIO->CRCSTATUS == 1)) {
-            _handle_pre_commit_rx(rx_buffer);
-        }
+    if (!nrf_sf_radio_rx_start(rx_buffer,
+                               slot_start_ticks -
+                               NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_RX_LEAD_US),
+                               rx_window_end_ticks, slot_active_end_ticks)) {
+        printf("[timecast-at] pre-commit rx error\n");
+    }
+    else {
+        _handle_pre_commit_rx(rx_buffer);
     }
 
     _pre_commit_finish_slot(false);
 }
 
 
-
 static void _log_round_summary_original(void)
 {
-    uint32_t now_tick = now_ticks();
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
     uint32_t p2_duration_ticks = _elapsed_since_ticks(g_round_p2_start_ticks, now_tick);
     uint16_t present_count = store_present_count(&g_store);
     uint32_t p2_slot_ticks = _fixed_p2_slot_ticks();
-
     printf("[timecast] round{id=%u,role=%s,round=%" PRIu32
            ",epoch=%" PRIu32 ",joined=%u,hop=%u,syncslot=%u"
            ",rx=%" PRIu32
@@ -643,9 +548,9 @@ static void _log_round_summary_original(void)
            (unsigned)present_count,
            (unsigned)P2_NODE_COUNT,
            (unsigned)P1_SLOT_US,
-           TIMER_TICKS_TO_US(p2_slot_ticks),
-           TIMER_TICKS_TO_US(p2_duration_ticks),
-           TIMER_TICKS_TO_US(g_round_p2_start_ticks));
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(p2_slot_ticks),
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(p2_duration_ticks),
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(g_round_p2_start_ticks));
 
     printf("}\n");
 }
@@ -653,7 +558,7 @@ static void _log_round_summary_original(void)
 static void _log_round_summary_pre_p2(void)
 {
     uint8_t local_pending_updates = (g_local_desired_class != g_scheduled_class[LOCAL_NODE_ID]) ? 1U : 0U;
-    uint32_t now_tick = now_ticks();
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
     uint32_t p2_duration_ticks = _elapsed_since_ticks(g_round_p2_start_ticks, now_tick);
     uint16_t present_count = store_present_count(&g_store);
     uint32_t p2_slot_ticks = p2_get_slot_ticks(&g_proto, &g_proto_cfg);
@@ -691,9 +596,9 @@ static void _log_round_summary_pre_p2(void)
            (unsigned)P2_NODE_COUNT,
            (unsigned)P1_SLOT_US,
            (unsigned)PRE_P2_SUBSLOT_PERIOD_US,
-           TIMER_TICKS_TO_US(p2_slot_ticks),
-           TIMER_TICKS_TO_US(p2_duration_ticks),
-           TIMER_TICKS_TO_US(g_round_p2_start_ticks));
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(p2_slot_ticks),
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(p2_duration_ticks),
+           NRF_SF_RADIO_TIMER_TICKS_TO_US(g_round_p2_start_ticks));
 
     if (log_update_state) {
         _format_class_map(scheduled_class_map, sizeof(scheduled_class_map),
@@ -759,24 +664,17 @@ static void _handle_p2_rx(const uint8_t *buf)
 
 static void _scan_until_reference(void)
 {
-    uint32_t rx_ticks;
-    
-    
+    uint32_t rx_ticks = 0;
     while (g_proto.p1.active &&
            !g_proto.p1.has_tref) {
-
-            _try_rx_enable(rx_buffer);
-
-           WAIT_UNTIL(NRF_RADIO->EVENTS_ADDRESS!=0, US_TO_TIMER_TICKS(P1_SCAN_LOG_INTERVAL_US));
-        if (NRF_RADIO->EVENTS_ADDRESS == 0) {
+        rx_ticks = nrf_sf_radio_rx_listen_until_packet(rx_buffer, P1_SLOT_TICKS,
+                                     P1_SCAN_LOG_INTERVAL_US);
+        if (rx_ticks >2U) {
+            _handle_p1_rx(rx_buffer, rx_ticks);
+        }
+        else if(rx_ticks == 0){
             printf("[timecast] waiting{id=%u,round=%" PRIu32 "}\n",
                    (unsigned)LOCAL_NODE_ID, g_round_count);
-        }else{
-            rx_ticks = get_last_address_time_ticks();
-            WAIT_UNTIL(NRF_RADIO->EVENTS_END != 0, P1_SLOT_TICKS);
-            if(NRF_RADIO->EVENTS_END != 0 && NRF_RADIO->CRCSTATUS == 1){
-                _handle_p1_rx(rx_buffer, rx_ticks - US_TO_TIMER_TICKS(TX_CHAIN_DELAY));
-            }
         }
     }
 }
@@ -785,10 +683,11 @@ static void _run_p1_slot(void)
 {
     bool do_tx = g_proto.p1.flag_tx;
     uint32_t slot_start_ticks = p1_get_slot_start_local_ticks(&g_proto, &g_proto_cfg);
-    uint32_t slot_active_end_ticks = slot_start_ticks + P1_SLOT_ACTIVE_TICKS - RADIO_RAMPUP_TIME_TICKS;
-    uint32_t now_tick = now_ticks();
+    uint32_t slot_active_end_ticks = slot_start_ticks + P1_SLOT_ACTIVE_TICKS -
+                                     NRF_SF_RADIO_RAMPUP_TIME_TICKS;
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
 
-    if ((int32_t)(now_tick - slot_start_ticks + RADIO_RAMPUP_TIME_TICKS) >= 0) {
+    if ((int32_t)(now_tick - slot_start_ticks + NRF_SF_RADIO_RAMPUP_TIME_TICKS) >= 0) {
         printf("[timecast] slot miss: slot=%u now=%" PRIu32 " start=%" PRIu32 "\n",
                (unsigned)g_proto.p1.slot_idx,
                now_tick, slot_start_ticks);
@@ -798,37 +697,34 @@ static void _run_p1_slot(void)
 
     if (do_tx) {
         p1_sync_frame_t frame;
-        uint8_t payload[PACKET_P1_SYNC_PAYLOAD_LEN] = {0};
-
-        p1_prepare_tx(&g_proto, &g_proto_cfg, &frame);
-
+        uint8_t payload[PACKET_P1_SYNC_APP_LEN] = {0};
+        p1_prepare_tx(&g_proto, &frame);
         frame.flags = g_round_run_pre ? 1U : 0U;
         encode_p1_sync(payload, sizeof(payload), &frame);
-
-        radio_tx_arm(payload, slot_start_ticks - RADIO_RAMPUP_TIME_TICKS);
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS!=0, slot_start_ticks + US_TO_TIMER_TICKS(40));
-        if (NRF_RADIO->EVENTS_ADDRESS==0) {
+        if (nrf_sf_radio_tx_start(payload,
+                                  slot_start_ticks -
+                                  NRF_SF_RADIO_RAMPUP_TIME_TICKS,
+                                  slot_active_end_ticks,
+                                  PACKET_P1_SYNC_APP_LEN)) {
+            p1_finish_slot(&g_proto, &g_proto_cfg, true);
+        }
+        else {
             g_proto.p1_tx_sched_fails++;
-            uint32_t now_tick = now_ticks();
+            uint32_t now_tick = nrf_sf_radio_now_ticks();
             int32_t slack_ticks = (int32_t)(slot_start_ticks - now_tick);
             printf("[timecast] TX schedule failed: now=%" PRIu32
                    " deadline=%" PRIu32 " slack=%" PRId32 " ticks fails=%" PRIu32   "\n",
-                   now_tick, slot_start_ticks + US_TO_TIMER_TICKS(40), slack_ticks, g_proto.p1_tx_sched_fails);
-            p1_finish_slot(&g_proto, &g_proto_cfg, false);
-        }else{
-            WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END!=0, slot_active_end_ticks);
-            p1_finish_slot(&g_proto, &g_proto_cfg, true);
-        }
+                   now_tick, slot_start_ticks + NRF_SF_RADIO_US_TO_TIMER_TICKS(40),
+                   slack_ticks, g_proto.p1_tx_sched_fails);
 
+            p1_finish_slot(&g_proto, &g_proto_cfg, false);
+        }
 
         return;
     }
 
-    radio_rx_arm(rx_buffer, slot_start_ticks - RADIO_RAMPUP_TIME_TICKS );
-    WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS!=0, slot_start_ticks + US_TO_TIMER_TICKS(60));
-    
+    nrf_sf_radio_wait_until_abs(NULL, slot_active_end_ticks);
 
-    WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END!=0, slot_active_end_ticks);
     p1_finish_slot(&g_proto, &g_proto_cfg, false);
 }
 
@@ -840,7 +736,7 @@ static void _run_pre_p2_subslot(void)
     uint32_t subslot_end_ticks = subslot_start_ticks + g_proto_cfg.pre_p2_subslot_ticks;
     uint32_t subslot_active_end_ticks = subslot_end_ticks - PRE_P2_SLOT_PROCESSING_TICKS;
     uint32_t rx_window_end_ticks = subslot_start_ticks + g_proto_cfg.pre_p2_rx_window_ticks;
-    uint32_t now_tick = now_ticks();
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
     uint8_t owner_id = g_proto.pre_p2.subslot_idx;
 
     if ((int32_t)(now_tick - subslot_start_ticks) >= 0) {
@@ -857,8 +753,8 @@ static void _run_pre_p2_subslot(void)
         uint8_t class_id;
         uint8_t payload[PACKET_PRE_P2_CTRL_LEN] = {0};
 
-        if(!g_proto.pre_p2.present[owner_id]){
-            WAIT_UNTIL_ABS(0, subslot_active_end_ticks);
+        if (!g_proto.pre_p2.present[owner_id]) {
+            nrf_sf_radio_wait_until_abs(NULL, subslot_active_end_ticks);
             pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
         }
@@ -867,41 +763,30 @@ static void _run_pre_p2_subslot(void)
         class_id = _payload_len_to_class(p2_payload_len);
 
         encode_pre_p2(payload, class_id);
-
-        radio_tx_arm(payload, subslot_start_ticks);
-
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS != 0U, 
-            subslot_start_ticks + RADIO_RAMPUP_TIME_TICKS + US_TO_TIMER_TICKS(40U));
-        if (NRF_RADIO->EVENTS_ADDRESS == 0U) {
-            printf("[timecast] pre-p2 TX schedule failed: slot=%u sub=%u\n",
-                   (unsigned)g_proto.pre_p2.slot_idx,
-                   (unsigned)g_proto.pre_p2.subslot_idx);
-            pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
-            return;
+        if (!nrf_sf_radio_tx_start(payload, subslot_start_ticks,
+                                   subslot_active_end_ticks,
+                                   PACKET_PRE_P2_CTRL_APP_LEN)) {
+            printf("[timecast-at] pre-collect tx error\n");
         }
-
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END != 0U, subslot_active_end_ticks);
         pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
         return;
     }
 
     if (g_proto.pre_p2.complete ||
         g_proto.pre_p2.present[owner_id]) {
-        WAIT_UNTIL_ABS(0, subslot_active_end_ticks);
+        nrf_sf_radio_wait_until_abs(NULL, subslot_active_end_ticks);
         pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
         return;
     }
 
-    radio_rx_arm(rx_buffer, subslot_start_ticks - US_TO_TIMER_TICKS(P2_RX_LEAD_US));
-    WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS != 0U, rx_window_end_ticks);
-    if (NRF_RADIO->EVENTS_ADDRESS != 0U) {
-
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END != 0U, 
-            subslot_active_end_ticks + US_TO_TIMER_TICKS(TX_CHAIN_DELAY));
-
-        if ((NRF_RADIO->EVENTS_END != 0U) && (NRF_RADIO->CRCSTATUS == 1)) {
-            _handle_pre_p2_rx(rx_buffer);
-        }
+    if (nrf_sf_radio_rx_start(rx_buffer,
+                              subslot_start_ticks -
+                              NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_RX_LEAD_US),
+                              rx_window_end_ticks, subslot_active_end_ticks)) {
+        _handle_pre_p2_rx(rx_buffer);
+    }
+    else {
+        printf("[timecast-at] pre-collect rx error\n");
     }
 
     pre_p2_finish_subslot(&g_proto, &g_proto_cfg);
@@ -915,12 +800,8 @@ static void _run_p2_subslot(void)
     uint32_t subslot_end_ticks = subslot_start_ticks + subslot_ticks;
     uint32_t subslot_active_end_ticks = subslot_end_ticks - SLOT_PROCESSING_TICKS;
     uint32_t rx_window_end_ticks = subslot_start_ticks + g_proto_cfg.p2_rx_window_ticks;
-    uint32_t now_tick = now_ticks();
+    uint32_t now_tick = nrf_sf_radio_now_ticks();
     uint8_t owner_id = g_proto.p2.subslot_idx;
-
-    if ((int32_t)(rx_window_end_ticks - subslot_active_end_ticks) > 0) {
-        rx_window_end_ticks = subslot_active_end_ticks;
-    }
 
     if ((int32_t)(now_tick - subslot_start_ticks) >= 0) {
         printf("[timecast] p2 miss: slot=%u sub=%u now=%" PRIu32 " deadline=%" PRIu32 "\n",
@@ -936,31 +817,22 @@ static void _run_p2_subslot(void)
         const uint8_t *data_ptr = NULL;
         uint8_t payload[PACKET_P2_DATA_MAX_PAYLOAD_LEN] = {0};
 
-
         if (!p2_prepare_tx(&g_proto, &g_store, &g_proto_cfg, &frame, &data_ptr)) {
-            now_tick = now_ticks();
-            WAIT_UNTIL(0, subslot_active_end_ticks - now_tick);
+            nrf_sf_radio_wait_until_abs(NULL, subslot_active_end_ticks);
             p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
         }
-        frame.flags = _local_packet_should_request_update(owner_id) ?
-                      1U : 0U;
-
+        frame.flags = _local_packet_should_request_update(owner_id) ? 1U : 0U;
         encode_p2_data(payload, &frame, data_ptr);
-
-        radio_tx_arm(payload, subslot_start_ticks);
-
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS!=0, subslot_start_ticks + RADIO_RAMPUP_TIME_TICKS + US_TO_TIMER_TICKS(40));
-        
-        if (NRF_RADIO->EVENTS_ADDRESS == 0) {
+        if (!nrf_sf_radio_tx_start(payload, subslot_start_ticks,
+                                   subslot_active_end_ticks,
+                                   PACKET_P2_DATA_APP_HDR_LEN +
+                                   frame.data_len)) {
             printf("[timecast] P2 TX schedule failed: slot=%u sub=%u\n",
                    (unsigned)g_proto.p2.slot_idx,
                    (unsigned)g_proto.p2.subslot_idx);
             p2_finish_subslot(&g_proto, &g_proto_cfg);
             return;
-        }else{
-            WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END!=0, subslot_active_end_ticks);
-            //printf("end time=%ld\n", TIMER_TICKS_TO_US(get_last_end_time_ticks() - subslot_active_end_ticks));
         }
 
         p2_finish_subslot(&g_proto, &g_proto_cfg);
@@ -969,23 +841,17 @@ static void _run_p2_subslot(void)
 
     if (store_has_data(&g_store, owner_id)) {
 
-        WAIT_UNTIL_ABS(false, subslot_active_end_ticks);
+        nrf_sf_radio_wait_until_abs(NULL, subslot_active_end_ticks);
         p2_finish_subslot(&g_proto, &g_proto_cfg);
         return;
     }
 
-    radio_rx_arm(rx_buffer, subslot_start_ticks - US_TO_TIMER_TICKS(P2_RX_LEAD_US));
-
-    WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_ADDRESS!=0, rx_window_end_ticks);
-    
-    if(NRF_RADIO->EVENTS_ADDRESS!=0){
-        WAIT_UNTIL_ABS(NRF_RADIO->EVENTS_END!=0, subslot_active_end_ticks + US_TO_TIMER_TICKS(TX_CHAIN_DELAY));
-        
-        if((NRF_RADIO->EVENTS_END != 0) && (NRF_RADIO->CRCSTATUS == 1)) {
-            _handle_p2_rx(rx_buffer);
-        }
+    if (nrf_sf_radio_rx_start(rx_buffer,
+                              subslot_start_ticks -
+                              NRF_SF_RADIO_US_TO_TIMER_TICKS(P2_RX_LEAD_US),
+                              rx_window_end_ticks, subslot_active_end_ticks)) {
+        _handle_p2_rx(rx_buffer);
     }
-    
 
     p2_finish_subslot(&g_proto, &g_proto_cfg);
 }
@@ -1015,11 +881,12 @@ static void _master_track_p2_completeness(void)
     }
 }
 
-static void _wait_until_round_end(void){
+static void _wait_until_round_end(void)
+{
     uint32_t p2_ticks;
 
     p2_ticks = 2*NTX*g_proto.p2.slot_ticks;
-    WAIT_UNTIL_ABS(0, g_round_p2_start_ticks + p2_ticks);
+    nrf_sf_radio_wait_until_abs(NULL, g_round_p2_start_ticks + p2_ticks);
 }
 
 static void _prepare_round(void)
@@ -1197,30 +1064,9 @@ int main(void)
            (unsigned)USE_PRE_P2,
            (unsigned)APP_DATA_LEN,
            (unsigned)LOCAL_PAYLOAD_LEN);
-    printf("[timecast] timing: p1_slot=%u us pre_p2_subslot=%u us p2_subslot=%u us "
-           "(proc={p1/p2:%u,pp2:%u} ramp=%u p1_air=%u p2_air=%u fast_ru=%u tc=%" PRIu32 ") "
-           "tx_min_arm=%u p1{rx_lead=%u} pp2{guard=%u} p2{rx_lead=%u nodes=%u guard=%u} gap=%u\n",
-           (unsigned)P1_SLOT_US,
-           (unsigned)PRE_P2_SUBSLOT_US,
-           (unsigned)P2_SUBSLOT_US,
-           (unsigned)SLOT_PROCESSING_US,
-           (unsigned)PRE_P2_SLOT_PROCESSING_US,
-           (unsigned)RADIO_RAMPUP_US,
-           (unsigned)PACKET_AIR_TIME_US(PACKET_P1_SYNC_PAYLOAD_LEN),
-           (unsigned)PACKET_AIR_TIME_US(PACKET_P2_DATA_HDR_LEN +
-                                              LOCAL_PAYLOAD_LEN),
-           (unsigned)FAST_RAMPUP,
-           TIMER_TICKS_TO_US(g_proto_cfg.p1_rx_ts_to_slot_start_ticks),
-           (unsigned)TX_MIN_ARM_LEAD_US,
-           (unsigned)P1_RX_LEAD_US,
-           (unsigned)PRE_P2_SUBSLOT_GUARD_US,
-           (unsigned)P2_RX_LEAD_US,
-           (unsigned)P2_NODE_COUNT,
-           (unsigned)P2_SUBSLOT_GUARD_US,
-           (unsigned)ROUND_GAP_US);
 
 
-    radio_start();
+    nrf_sf_radio_start();
 
     store_init(&g_store, (uint8_t)LOCAL_NODE_ID);
     protocol_init(&g_proto, _is_master());
@@ -1228,8 +1074,8 @@ int main(void)
     _local_payload_init();
 
     g_round_count = 0U;
-    next_master_round_start_ticks = now_ticks() +
-                                    US_TO_TIMER_TICKS(MASTER_START_DELAY_US);
+    next_master_round_start_ticks = nrf_sf_radio_now_ticks() +
+                                    NRF_SF_RADIO_US_TO_TIMER_TICKS(MASTER_START_DELAY_US);
 
     while (1) {
         if (USE_PRE_P2) {

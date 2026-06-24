@@ -109,7 +109,6 @@ void p1_start(timecast_protocol_state_t *state,
 uint32_t p1_get_slot_start_local_ticks(const timecast_protocol_state_t *state,
                                                          const timecast_protocol_cfg_t *cfg);
 void p1_prepare_tx(timecast_protocol_state_t *state,
-                                     const timecast_protocol_cfg_t *cfg,
                                      p1_sync_frame_t *frame);
 void p1_handle_rx(timecast_protocol_state_t *state,
                                     const p1_sync_frame_t *frame,

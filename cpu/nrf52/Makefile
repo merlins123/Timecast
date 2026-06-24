@@ -9,8 +9,6 @@ ifneq (,$(filter nrf802154,$(USEMODULE)))
     DIRS += radio/nrf802154
 endif
 
-ifneq (,$(filter nrf_sf_radio_ppi,$(USEMODULE)))
-    DIRS += nrf_sf_radio_ppi
-endif
+
 
 include $(RIOTBASE)/Makefile.base
